@@ -34,16 +34,25 @@ export function readProject(id) {
   try { return normalizeProject(parse(db.prepare('SELECT data FROM project WHERE id=1').get())); }
   finally { db.close(); }
 }
+/** 单个工程读不出来（半建好、库损坏）时跳过，不能让列表与后台轮询整体失败。 */
 export function listProjects() {
   if (!existsSync(projectsRoot)) return [];
   return readdirSync(projectsRoot).filter((id) => safeId(id) && existsSync(join(projectsRoot, id, 'project.sqlite')))
-    .map((id) => { const p = readProject(id); return { id, name: p.name, revision: p.revision, createdAt: p.createdAt, shots: p.shots.length, duration: p.song?.duration ?? null, status: p.status ?? 'normal' }; })
+    .flatMap((id) => {
+      let p;
+      try { p = readProject(id); } catch (error) { console.error(`[工程] 跳过无法读取的 ${id}：${error.message}`); return []; }
+      return [{ id, name: p.name, revision: p.revision, createdAt: p.createdAt, updatedAt: p.updatedAt ?? p.createdAt, shots: p.shots.length, duration: p.song?.duration ?? null, status: p.status ?? 'normal',
+        audio: { name: p.audio?.name ?? null, hash: p.audio?.hash?.slice(0, 12) ?? null }, audioHash: p.audio?.hash ?? null }];
+    })
     .sort((a, b) => b.createdAt - a.createdAt);
 }
+const KEEP_REVISIONS = 200;
 export function mutateProject(id, expectedRevision, mutate) {
   const db = open(id);
+  let begun = false;
   try {
     db.exec('BEGIN IMMEDIATE');
+    begun = true;
     const current = normalizeProject(parse(db.prepare('SELECT data FROM project WHERE id=1').get()));
     if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new ProjectError('工程已更新，请重新读取后再操作', 409);
     const next = normalizeProject(mutate(structuredClone(current)));
@@ -52,13 +61,33 @@ export function mutateProject(id, expectedRevision, mutate) {
     const data = JSON.stringify(next);
     db.prepare('UPDATE project SET data=? WHERE id=1').run(data);
     db.prepare('INSERT INTO revisions(revision,data,created_at) VALUES(?,?,?)').run(next.revision, data, next.updatedAt);
+    // 每次写入都存整份工程（含歌曲分析），只留最近的历史，避免库无限增长；revision 0（初始导入）保留。
+    db.prepare('DELETE FROM revisions WHERE revision > 0 AND revision <= ?').run(next.revision - KEEP_REVISIONS);
     db.exec('COMMIT');
     return next;
-  } catch (error) { db.exec('ROLLBACK'); throw error; }
+  } catch (error) {
+    if (begun) { try { db.exec('ROLLBACK'); } catch { /* 保留原始错误 */ } }
+    throw error;
+  }
   finally { db.close(); }
 }
 
-function hashTree(dir, prefix = '') {
+export const SCHEMA_VERSION = 1;
+/** 新工程库：project 单行 + revisions 历史 + jobs；user_version 供以后迁移判断。 */
+export function initProjectDb(file, project) {
+  const db = new DatabaseSync(file);
+  try {
+    db.exec(`PRAGMA journal_mode=WAL;
+      CREATE TABLE IF NOT EXISTS project(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS revisions(revision INTEGER PRIMARY KEY,data TEXT NOT NULL,created_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+      PRAGMA user_version=${SCHEMA_VERSION};`);
+    db.prepare('INSERT INTO project VALUES(1,?)').run(JSON.stringify(project));
+    db.prepare('INSERT INTO revisions VALUES(0,?,?)').run(JSON.stringify(project), project.createdAt);
+  } finally { db.close(); }
+}
+
+export function hashTree(dir, prefix = '') {
   return readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
     const key = prefix + entry.name;
     return entry.isDirectory() ? hashTree(join(dir, entry.name), key + '/') : [[key, sha256(readFileSync(join(dir, entry.name)))]];
@@ -72,6 +101,12 @@ export function createProjectFromAudio(audioPath, name, opts = {}) {
   if (!existsSync(path) || !statSync(path).isFile() || statSync(path).size > 300 * 1024 * 1024) throw new ProjectError('音频不存在或超过 300 MB');
   const audio = readFileSync(path);
   const audioHash = sha256(audio);
+  // 同一音频已有工程时默认拒绝：agent 收到“改一下”时容易重新建工程，导致修改落到空白新工程、缓存全失。
+  if (opts.allowDuplicate !== true) {
+    const existing = listProjects().filter((project) => project.audioHash === audioHash);
+    if (existing.length) throw new ProjectError(`这段音频已有 ${existing.length} 个工程：请继续修改已有工程；确实要另起一个新工程时传 allowDuplicate: true`, 409,
+      { existingProjects: existing.map(({ id, name: projectName, updatedAt }) => ({ id, name: projectName, updatedAt })) });
+  }
   const knownHash = sha256(readFileSync(join(referenceRoot, 'audio/pdoom.mp3')));
   const isReference = audioHash === knownHash;
 
@@ -116,15 +151,7 @@ function createReferenceProject(audioPath, path, audio, audioHash, name) {
     credits: 'Engine/scenes: pdoom-video (MIT). Song, lyrics and fonts retain their original rights; see engine/CREDITS.md.',
   };
   normalizeProject(project);
-  const db = new DatabaseSync(join(dir, 'project.sqlite'));
-  try {
-    db.exec(`PRAGMA journal_mode=WAL;
-      CREATE TABLE project(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
-      CREATE TABLE revisions(revision INTEGER PRIMARY KEY,data TEXT NOT NULL,created_at INTEGER NOT NULL);
-      CREATE TABLE jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);`);
-    db.prepare('INSERT INTO project VALUES(1,?)').run(JSON.stringify(project));
-    db.prepare('INSERT INTO revisions VALUES(0,?,?)').run(JSON.stringify(project), project.createdAt);
-  } finally { db.close(); }
+  initProjectDb(join(dir, 'project.sqlite'), project);
   return project;
 }
 
@@ -153,11 +180,11 @@ export function readShotLyricContext(id, shotId) {
 function versionSnapshot(shot) {
   return structuredClone({ module: shot.module, params: shot.params, source: shot.source, start: shot.start, end: shot.end,
     codeHash: shot.codeHash, prompt: shot.prompt, lyricPlan: shot.lyricPlan, summary: shot.summary, validation: shot.validation,
-    intent: shot.intent, mode: shot.mode, duration: shot.duration, easing: shot.easing, direction: shot.direction });
+    intent: shot.intent, mode: shot.mode, duration: shot.duration, easing: shot.easing, direction: shot.direction, effects: shot.effects, effect: shot.effect });
 }
 /** 快照键以基线为唯一事实：候选期写入而基线没有的字段必须删除，浅合并会残留候选的 codeHash/summary 等。 */
 function restoreSnapshot(target, snapshot) {
-  for (const key of ['module', 'params', 'source', 'start', 'end', 'codeHash', 'prompt', 'lyricPlan', 'summary', 'validation', 'intent', 'mode', 'duration', 'easing', 'direction']) {
+  for (const key of ['module', 'params', 'source', 'start', 'end', 'codeHash', 'prompt', 'lyricPlan', 'summary', 'validation', 'intent', 'mode', 'duration', 'easing', 'direction', 'effects', 'effect']) {
     if (snapshot[key] === undefined) delete target[key];
     else target[key] = structuredClone(snapshot[key]);
   }
@@ -169,6 +196,7 @@ export function updateShot(id, shotId, expectedInputRevision, patch, attemptToke
     const shot = shotFor(project, shotId, expectedInputRevision);
     const directorOp = trackDirectorCommit(project, shot, 'shot', attemptToken, author);
     const edits = Object.keys(patch).filter((key) => key !== 'locked');
+    if (patch.locked === false && shot.locked && author !== 'human') throw new ProjectError('锁定的镜头只能由人在审阅室解锁', 403);
     if (shot.locked && edits.length) throw new ProjectError('镜头已锁定，请先显式解锁', 409);
     if (patch.title !== undefined) {
       if (typeof patch.title !== 'string' || !patch.title.trim() || patch.title.length > 120) throw new ProjectError('镜头标题为空或过长');
@@ -305,10 +333,13 @@ export function rejectShotFeedback(id, shotId, expectedInputRevision, kind = 'sh
   });
 }
 
-export function updateTransition(id, transitionId, expectedInputRevision, patch) {
+export function updateTransition(id, transitionId, expectedInputRevision, patch, attemptToken, author = 'human') {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.keys(patch).some((key) => !['intent', 'locked'].includes(key))) throw new ProjectError('这里只编辑转场指导或锁定；效果参数请提交 config');
+  if (!['human', 'mcp'].includes(author)) throw new ProjectError('invalid transition author');
   return mutateProject(id, undefined, (project) => {
     const transition = targetFor(project, transitionId, expectedInputRevision, 'transition');
+    const directorOp = patch.intent !== undefined ? trackDirectorCommit(project, transition, 'transition', attemptToken, author) : null;
+    if (patch.locked === false && transition.locked && author !== 'human') throw new ProjectError('锁定的转场只能由人在审阅室解锁', 403);
     if (transition.locked && patch.intent !== undefined) throw new ProjectError('转场已锁定，请先解锁', 409);
     if (patch.intent !== undefined) {
       if (typeof patch.intent !== 'string' || !patch.intent.trim() || patch.intent.length > 8000) throw new ProjectError('转场指导不能为空或过长');
@@ -319,6 +350,7 @@ export function updateTransition(id, transitionId, expectedInputRevision, patch)
       if (typeof patch.locked !== 'boolean') throw new ProjectError('locked must be boolean');
       transition.locked = patch.locked;
     }
+    if (directorOp) directorOp.cursorToken = transition.inputToken;
     return project;
   });
 }
@@ -379,6 +411,12 @@ export function saveJob(id, job) {
 export function listJobs(id, limit = 40) {
   const db = open(id);
   try { return db.prepare('SELECT data FROM jobs ORDER BY updated_at DESC LIMIT ?').all(Math.min(10000, Math.max(1, limit))).map(parse); }
+  finally { db.close(); }
+}
+/** 服务重启时恢复用：只取未结束的任务，按创建先后排序。 */
+export function listUnfinishedJobs(id) {
+  const db = open(id);
+  try { return db.prepare("SELECT data FROM jobs WHERE status IN ('queued','running')").all().map(parse).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)); }
   finally { db.close(); }
 }
 export function readJob(id, jobId) {
