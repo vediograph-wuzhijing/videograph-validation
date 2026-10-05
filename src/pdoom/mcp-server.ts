@@ -12,7 +12,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { projectToolDefinitions, callProjectTool } from '../server/mcp-tools.ts';
-import { feedbackToolDefinitions, feedbackToolNames, callFeedbackTool, mcpToolResult } from '../server/mcp-feedback-tools.ts';
+import { feedbackToolDefinitions, feedbackToolNames, callFeedbackTool, mcpToolResult, ServiceError } from '../server/mcp-feedback-tools.ts';
 import { aeToolDefinitions, aeToolNames, callAeTool } from '../server/mcp-ae-tools.ts';
 import { directorToolDefinitions, directorToolNames, callDirectorTool } from '../server/mcp-director-tools.ts';
 import { fxToolDefinitions, fxToolNames, callFxTool } from '../server/mcp-fx-tools.ts';
@@ -21,9 +21,16 @@ import { fxToolDefinitions, fxToolNames, callFxTool } from '../server/mcp-fx-too
 // 旧演示视图的 shot_queue_*、shot_cards_*、pdoom_*、lyric_research_draft 工具已于 CLEANUP-01 移除。
 
 const productRoot = fileURLToPath(new URL('../..', import.meta.url));
+// 服务器级说明：所有 MCP 客户端在会话开始时都会拿到，纠正“一说改就新建工程”“改一镜全片重渲”两类误用。
+const instructions = [
+  'VideoGraph 是 LLM 的 After Effects：你通过这些工具操作本机视频工程，人在审阅室看片、提意见、采用。完整说明见 resource videograph://docs/mcp-guide。',
+  '1. 先找已有工程：用户要求修改、继续、重新导出某部片子时，先 project_list（按名称/音频辨认）→ project_get，然后在这个工程上改。只有用户明确要做一部新片才调用 project_create_from_audio；服务对同一音频返回 409 + existingProjects 时改用已有工程。会话里记住并沿用 projectId。',
+  '2. 只改要改的镜头：导出缓存按镜头计（源码哈希 + params + 后期栈 + 镜头素材）。改某一段只对该镜 project_shot_submit / project_shot_update / project_shot_effects；多镜共用一份场景源码时，只把新版本提交给目标镜头，不要把共用文件重新提交给所有镜头（那会让全片重渲）。导出后读 result.cacheSummary 与 reports[].missReason，告诉用户哪些镜头重渲了、为什么。',
+  '3. 硬规则：AI 不能接受/采用意见、不能接受审片、不能解锁镜头或转场；409 时重读最新版本再判断，不要原样重试。',
+].join('\n');
 const server = new Server(
-  { name: 'videograph', version: '0.6.1' },
-  { capabilities: { tools: {}, resources: {}, prompts: {} } },
+  { name: 'videograph', version: '0.7.0' },
+  { capabilities: { tools: {}, resources: {}, prompts: {} }, instructions },
 );
 
 function textResult(value: unknown, isError = false) {
@@ -40,15 +47,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // FX：在 MCP 进程内执行（按需从上游下载），不需要工程服务；直接返回 MCP content（含案例联系表图片）。
   if (fxToolNames.has(name)) {
     try { return await callFxTool(name, args); }
-    catch (error) { return textResult({ error: String(error), hint: '首次使用需要能访问 github.com；GitHub API 匿名限额 60 次/小时，可设置 GITHUB_TOKEN' }, true); }
+    catch (error) {
+      // 只有网络/下载类错误才提示 GitHub；参数错误（如特效箱里没有某个 id）不该引导去查网络。
+      const network = /fetch failed|ENOTFOUND|ECONN|ETIMEDOUT|EAI_AGAIN|TimeoutError|rate limit|github|HTTP 4\d\d|HTTP 5\d\d/i.test(`${String(error)} ${String((error as { cause?: unknown }).cause ?? '')}`);
+      return textResult({ error: String(error), ...(network ? { hint: '需要能访问 github.com；GitHub API 匿名限额 60 次/小时，可设置 GITHUB_TOKEN' } : {}) }, true);
+    }
   }
   const call = feedbackToolNames.has(name) ? callFeedbackTool
     : aeToolNames.has(name) ? callAeTool
     : directorToolNames.has(name) ? callDirectorTool
     : projectToolDefinitions.some((tool) => tool.name === name) ? callProjectTool : null;
   if (!call) return textResult({ error: `Unknown tool: ${name}` }, true);
-  try { return mcpToolResult(await call(name, args)); }
-  catch (error) { return textResult({ error: String(error), hint: name === 'craft_guide' ? undefined : '工程服务需要运行：npm run service' }, true); }
+  try { return mcpToolResult(await call(name, args), { embedImages: args.embedImages !== false }); }
+  catch (error) {
+    const details = error instanceof ServiceError ? { status: error.status, ...error.details } : {};
+    return textResult({ error: error instanceof Error ? error.message : String(error), ...details }, true);
+  }
 });
 
 // AE-05：技法库与平台指南作为 MCP resources（只读；不暴露仓库其他文件）。
@@ -120,6 +134,8 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
   const prompt = prompts[request.params.name as keyof typeof prompts];
   if (!prompt) throw new Error(`unknown prompt: ${request.params.name}`);
   const args = (request.params.arguments ?? {}) as Record<string, string>;
+  const missing = prompt.arguments.filter((argument) => argument.required && !args[argument.name]?.trim()).map((argument) => argument.name);
+  if (missing.length) throw new Error(`prompt ${request.params.name} 缺少必填参数：${missing.join(', ')}`);
   return { description: prompt.description, messages: [{ role: 'user' as const, content: { type: 'text' as const, text: prompt.text(args) } }] };
 });
 

@@ -1,13 +1,10 @@
 // mcp-ae-tools.ts — LLM-AE 冲刺（AE-01～05）：节奏表、帧序列、全片缩略图、节奏报告、技法库节选。
 // 与其他 MCP 工具一样只是本地工程服务的 HTTP 客户端；渲染类工具入队后可在本次调用内等待结果。
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 // @ts-ignore — 纯 JS 模块（scripts/skills/craft-excerpt.mjs），无类型声明。
 import { craftGuide, CRAFT_TOPICS } from '../../scripts/skills/craft-excerpt.mjs';
+import { serviceFetch, embedImagesProperty } from './mcp-feedback-tools.ts';
 
-const productRoot = fileURLToPath(new URL('../..', import.meta.url));
-const waitProperty = { waitSeconds: { type: 'integer', minimum: 0, maximum: 50, description: '本次调用内最多等待渲染完成的秒数（默认 25，上限 50：MCP 客户端常见请求超时为 60 秒）；超时则返回进行中的 job，再用 project_job_get 的 waitSeconds 等待' } };
+const waitProperty = { waitSeconds: { type: 'integer', minimum: 0, maximum: 50, description: '本次调用内最多等待渲染完成的秒数（默认 25，上限 50：MCP 客户端常见请求超时为 60 秒，入队耗时会从等待预算中扣除）；超时则返回进行中的 job，再用 project_job_get 的 waitSeconds 等待' }, ...embedImagesProperty };
 const rangeProperties = {
   shotId: { type: 'string', description: '只看该镜头的时间窗' },
   transitionId: { type: 'string', description: '看该转场切点前后各 1 秒' },
@@ -44,22 +41,6 @@ export const aeToolDefinitions = [
 ];
 export const aeToolNames = new Set(aeToolDefinitions.map((tool) => tool.name));
 
-async function serviceRequest(path: string, body?: unknown, timeoutMs = 120000): Promise<Record<string, unknown>> {
-  const base = process.env.VIDEOGRAPH_SERVICE_URL ?? 'http://127.0.0.1:5191';
-  const parsed = new URL(base);
-  if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname)) throw new Error('工程服务必须是本机 HTTP 地址');
-  const token = readFileSync(process.env.VIDEOGRAPH_SERVICE_TOKEN_FILE ?? join(productRoot, '.cache/service-token'), 'utf8');
-  const response = await fetch(base.replace(/\/$/, '') + path, {
-    method: body === undefined ? 'GET' : 'POST',
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  const result = await response.json() as Record<string, unknown>;
-  if (!response.ok) throw new Error(String(result.error ?? `HTTP ${response.status}`));
-  return result;
-}
-
 const pick = (args: Record<string, unknown>, keys: string[]) => Object.fromEntries(keys.filter((key) => args[key] !== undefined).map((key) => [key, args[key]]));
 
 export async function callAeTool(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -67,12 +48,15 @@ export async function callAeTool(name: string, args: Record<string, unknown>): P
   const projectId = encodeURIComponent(String(args.projectId ?? ''));
   if (name === 'song_cue_sheet') {
     const query = new URLSearchParams(pick(args, ['start', 'end']) as Record<string, string>);
-    return serviceRequest(`/projects/${projectId}/cue-sheet${query.size ? '?' + query : ''}`);
+    return serviceFetch(`/projects/${projectId}/cue-sheet${query.size ? '?' + query : ''}`);
   }
   const kind = { project_filmstrip: 'filmstrip', project_contact_sheet: 'contact-sheet', project_rhythm_report: 'rhythm' }[name];
   if (!kind) throw new Error(`unknown ae tool: ${name}`);
-  const job = await serviceRequest(`/projects/${projectId}/${kind}`, pick(args, ['shotId', 'transitionId', 'start', 'end', 'around', 'frames', 'sampleFps', 'thumbWidth', 'columns', 'ratios']));
-  const wait = Math.min(50, Math.max(0, Number(args.waitSeconds ?? 25)));
-  if (!wait) return job;
-  return serviceRequest(`/projects/${projectId}/jobs/${encodeURIComponent(String(job.id))}?wait=${wait}`, undefined, (wait + 30) * 1000);
+  // 整次调用控制在 MCP 客户端常见的 60 秒超时以内：入队最多 15 秒，等待只用剩余预算。
+  const started = Date.now();
+  const job = await serviceFetch(`/projects/${projectId}/${kind}`, pick(args, ['shotId', 'transitionId', 'start', 'end', 'around', 'frames', 'sampleFps', 'thumbWidth', 'columns', 'ratios']), 15000);
+  const budget = Math.floor(55 - (Date.now() - started) / 1000);
+  const wait = Math.min(50, budget, Math.max(0, Number(args.waitSeconds ?? 25)));
+  if (wait <= 0) return job;
+  return serviceFetch(`/projects/${projectId}/jobs/${encodeURIComponent(String(job.id))}?wait=${wait}`, undefined, (wait + 4) * 1000);
 }

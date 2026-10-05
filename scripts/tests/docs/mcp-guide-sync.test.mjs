@@ -23,9 +23,10 @@ function walk(dir, files = []) {
   return files;
 }
 
-test('skill 目录无本机绝对路径与密钥', () => {
+test('skill 目录与 MCP 指南无本机绝对路径与密钥', () => {
   const patterns = [/F:[\\/]/, /C:[\\/]Users/i, /\/home\//, /sk-[A-Za-z0-9]{16,}/, /AIza[A-Za-z0-9_-]{20,}/, /ghp_[A-Za-z0-9]{20,}/];
-  for (const file of walk(skillDir)) {
+  const files = [...walk(skillDir), ...walk(join(root, '.agents/skills')), ...(existsSync(guidePath) ? [guidePath] : [])];
+  for (const file of files) {
     const text = readFileSync(file, 'utf8');
     for (const pattern of patterns) assert.doesNotMatch(text, pattern, `${file} 命中 ${pattern}`);
   }
@@ -57,9 +58,20 @@ test('MCP 工具名与指南 §3 一致', { skip: guideMissing }, () => {
   const section3 = guide.split(/^## 3\. 工具参考.*$/m)[1]?.split(/^## \d/m)[0] ?? '';
   const guideTools = [...section3.matchAll(/^\| `([a-z_]+)` \|[^\n]*$/gm)].map((m) => m[1]);
   for (const name of codeTools) assert.ok(guideTools.includes(name), `代码工具 ${name} 未写入指南 §3`);
-  for (const name of guideTools.filter((name) => name.startsWith('project_'))) {
-    assert.ok(codeTools.includes(name), `指南 §3 的 ${name} 在 projectToolDefinitions 中不存在`);
-  }
+  for (const name of guideTools) assert.ok(codeTools.includes(name), `指南 §3 的 ${name} 在 MCP 工具定义中不存在`);
+});
+test('server 版本与指南 toolset 行一致', { skip: guideMissing }, () => {
+  const version = /name: 'videograph', version: '([0-9.]+)'/.exec(readFileSync(join(root, 'src/pdoom/mcp-server.ts'), 'utf8'))?.[1];
+  assert.ok(version, 'mcp-server.ts 找不到 server version');
+  const toolset = /^toolset:.*$/m.exec(readFileSync(guidePath, 'utf8'))?.[0] ?? '';
+  assert.ok(toolset.includes(`\`videograph\` ${version}`), `指南 toolset 行应写 server videograph ${version}`);
+});
+test('MCP 工具不暴露人工闸门：无 locked、无 author 自选、不调用 accept/reject 路由', () => {
+  const code = toolsCode();
+  assert.doesNotMatch(code, /locked: \{ type: 'boolean' \}/, 'AI 不能改锁：patch schema 不应含 locked');
+  assert.doesNotMatch(code, /enum: \['mcp', 'human'\]/, 'AI 不能自标 author=human');
+  assert.doesNotMatch(code, /author: args\.author/, 'author 必须固定为 mcp');
+  assert.doesNotMatch(code, /accept-(feedback|review)|reject-feedback/, 'MCP 不应调用人工接受/拒绝路由');
 });
 test('SKILL.md toolset 与指南一致；路线 B 工具表已生成且覆盖全部工具', { skip: guideMissing }, () => {
   const guide = readFileSync(guidePath, 'utf8');

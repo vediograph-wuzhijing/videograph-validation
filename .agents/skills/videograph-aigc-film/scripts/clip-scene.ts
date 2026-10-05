@@ -47,7 +47,12 @@ export default class AigcClip extends Scene {
 
   override async init() {
     const P = this.ctx.params as P;
-    const load = async (url: string) => createImageBitmap(await (await fetch(url)).blob());
+    const load = async (url: string) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`素材缺失 ${res.status}：${url}`);
+      return createImageBitmap(await res.blob());
+    };
+    // 帧序列全部预解码成 ImageBitmap（1280×720 每帧约 3.7MB）：几百帧的长镜头会占用上 GB 内存，长镜头请拆分或降分辨率。
     if (P.kind === 'video') {
       if (P.frames > 0) this.frames = await Promise.all(Array.from({ length: P.frames }, (_, i) => load(`${DIR}/${P.shot}/${String(i + 1).padStart(4, '0')}.jpg`)));
       else this.kf = await load(`${DIR}/kf-${P.shot}.jpg`);

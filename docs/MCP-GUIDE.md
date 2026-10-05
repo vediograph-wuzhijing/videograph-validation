@@ -4,7 +4,7 @@
 > **维护规则：** 新增、删除、改名或改变任何 MCP 工具的参数/语义时，必须在同一提交中更新本文件（工具表 + 相关流程），并更新下方 `toolset` 版本行。`scripts/tests/docs/mcp-guide-sync.test.mjs`（SKILL-01 交付）会检查工具名与本文件一致。
 > 计划与进度不写在这里，见 [ROADMAP.md](../ROADMAP.md)。
 
-toolset: 2026-10-03 · server `videograph` 0.6.1（新增 AIGC 短片 skill resources）· 状态：§3 为已实现工具（含意见与画面、歌曲分析/重试/修正与规划、节奏与画面感知、导演工作流和证据化自评、案例库与上游来源）；MCP resources 与 prompts 见 §3 末尾；导演闭环与恢复见 §4/§6。
+toolset: 2026-10-05 · server `videograph` 0.7.0（服务器级 instructions；重复建工程守卫 allowDuplicate；AI 不能改锁、不能自标 author；导出 cacheSummary/missReason；图片嵌入封顶 embedImages；错误带 HTTP 状态码）· 状态：§3 为已实现工具（含意见与画面、歌曲分析/重试/修正与规划、节奏与画面感知、导演工作流和证据化自评、案例库与上游来源）；MCP resources 与 prompts 见 §3 末尾；导演闭环与恢复见 §4/§6。
 
 > **定位（2026-10-02）：VideoGraph 是 LLM 的 After Effects。** 你（agent）是操作者：建工程、规划、写镜头、调节奏、渲染与自查；人在前端看片、提意见、对比、采用/拒绝。改完不要只看“没有报错”——用 §3「节奏与画面感知」的工具看运动、量节奏、看全片。
 
@@ -17,16 +17,18 @@ npm run service      # 工程服务 127.0.0.1:5191，写 .cache/service-token
 npm run mcp          # MCP stdio server（由 MCP 客户端拉起，一般不手动运行；旧名 mcp:pdoom 仍可用）
 ```
 
-MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 HTTP + 服务令牌调用 5191，不直接写数据库或工程文件。工具返回 `工程服务需要运行` 时，先启动 service。
+MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 HTTP + 服务令牌调用 5191，不直接写数据库或工程文件。工具返回“连不上工程服务”或“读不到服务令牌”时，先启动 service。服务返回的错误以 `HTTP <状态码>：…` 开头，并在结果里带 `status` 与服务端附加字段（如 `existingProjects`）；409 表示版本或状态冲突，重读后再判断。
 
-客户端配置示例（stdio；路径按本机修改。该配置尚未在每种客户端中逐一验证）：
+服务器连接时下发 `instructions`（先找已有工程、只改目标镜头、人工闸门三条），内容与本文 §2 硬规则一致。
+
+客户端配置示例（stdio；`<repo>` 换成本仓库的绝对路径。该配置尚未在每种客户端中逐一验证）：
 
 ```json
 {
   "mcpServers": {
     "videograph": {
       "command": "node",
-      "args": ["--experimental-strip-types", "--no-warnings", "F:/aicg/video-graph-demo/src/pdoom/mcp-server.ts"],
+      "args": ["--experimental-strip-types", "--no-warnings", "<repo>/src/pdoom/mcp-server.ts"],
       "env": {
         "VIDEOGRAPH_SERVICE_URL": "http://127.0.0.1:5191"
       }
@@ -37,14 +39,15 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 
 - 并行实例使用独立端口与令牌：同时设置 `VIDEOGRAPH_SERVICE_URL` 和 `VIDEOGRAPH_SERVICE_TOKEN_FILE`，与该实例的 service 一致（见 `.env.example`）。
 - 工具列表在客户端会话启动时加载；MCP 代码更新后需重连 MCP 才能看到新工具。
-- 渲染类工具可带 `waitSeconds`（≤50）在一次调用内等待结果；上限 50 秒是为了不触发 MCP 客户端常见的 60 秒请求超时。
+- 渲染类工具可带 `waitSeconds`（≤50）在一次调用内等待结果；上限 50 秒是为了不触发 MCP 客户端常见的 60 秒请求超时，入队耗时会从等待预算中扣除（整次调用 ≤55 秒）。
+- 返回图片的工具（stills / filmstrip / contact-sheet / rhythm 及其 `project_job_get`）单次嵌入的 base64 总量约 4MB 封顶，超出的只给 `artifacts/<key>.png` 路径；`embedImages: false` 只返回路径。
 
 ## 2. 核心概念
 
 | 概念 | 含义 |
 |---|---|
 | 镜头 shot | 稳定 `id`、`title`、时间窗 `start/end`（全曲秒）、`prompt`（原始意图）、`params`、`lyricPlan`、`module`（场景源码文件）、`codeHash`、`source`（imported / mcp-authored / human-authored） |
-| 转场 transition | 相邻两镜头之间的独立节点：`intent`、`mode`(cut/dissolve/wipe/dip)、`duration`、`easing`、`direction` |
+| 转场 transition | 相邻两镜头之间的独立节点：`intent`、`mode`(cut/dissolve/wipe/dip/effect)、`duration`、`easing`、`direction`；`mode: effect` 时另有冻结的特效箱动效 `effect` |
 | 工程 `revision` | `project_get`、`project_director_get/next` 返回的工程版本；导演方案与自评写入传 `expectedProjectRevision`。分析 patch、歌词与规划写入则把工程版本传为 `expectedInputRevision` |
 | 目标 `inputRevision / inputToken` | 镜头/转场各自的输入版本和唯一 token；目标写入传 `expectedInputRevision`，版本不匹配返回 409。不要把目标版本与工程版本混用 |
 | 导演 operation / receipt | action 的 `id` 用作 `actionId`；claim 返回 `operation.attemptToken`。镜头 update 只记录 `cursorToken`，不产生源码 receipt；随后同 token 的 submit 才保存当前目标 `inputToken / codeHash / inputRevision` receipt，complete 不接受无凭据的制作完成声明 |
@@ -59,9 +62,11 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 1. **AI 不能接受意见。** `accepted` 只能由人在界面完成，MCP 没有也不会有接受工具。技术验证通过 ≠ 人满意。
 2. 只改目标：`project_shot_submit` 只作用于一个镜头并生成不可变的新源码文件；不要借响应一条意见顺手重写其他镜头。
 3. 保留原始意图：不要用 `project_shot_update` 把人的意见写进 `prompt` 覆盖原文；意见本身已单独保存。
-4. 锁定的镜头/转场必须由人解锁后才能修改；不要自行解锁来完成任务。
+4. 锁定的镜头/转场只能由人在界面解锁：MCP 的 update patch 不接受 `locked`，服务端也拒绝 AI 解锁。
 5. 时间一律从分析数据推导（词起点、拍点），不在场景代码里硬编码秒数。
 6. 有未接受意见或 `needs-generation` 的镜头/转场时，`project_render` 会被拒绝，这是预期行为。
+7. **先找已有工程。** 用户说“把 X 改一下”“重新导出”时，先 `project_list` 辨认目标工程并沿用其 id；只有用户明确要新片才建工程。同一音频已有工程时 `project_create_from_audio` 返回 409 与 `existingProjects`，用户确实要新工程才带 `allowDuplicate: true`。
+8. **局部修改只重渲局部。** 导出分段缓存按镜头计：该镜源码哈希、`params`、后期栈、时间窗、镜头专属素材（`engine/app/public/**/<shotId>/`），有入场转场时再加上一镜与转场配置；引擎文件、宿主渲染代码、浏览器版本、fps/samples 变化会让全片失效。改一镜只对该镜 submit/update；多镜共用一份场景源码时，只把改过的版本提交给目标镜头，其他镜头保留旧模块，不要把共用文件重新提交给所有镜头。导出后用 `result.cacheSummary` 与 `reports[].missReason` 向用户说明哪些镜头重渲及原因。
 
 ## 3. 工具参考（已实现）
 
@@ -69,13 +74,13 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 
 | 工具 | 必填参数 | 作用 / 返回 |
 |---|---|---|
-| `project_list` | — | 本地工程列表 |
-| `project_create_from_audio` | `audioPath` | 任意本地音频建工程，可选 `name / lyricsText / lrcPath / language / stages`（`t0/t1/t3` 组合，必须含 `t1`）。指纹命中 pdoom-video 原 BGM → 参考导入（行为不变）；否则新歌工程 `analysis-pending`：复制通用引擎（不含绑定原曲歌词的场景），后台自动分析（有 `lyricsText/lrcPath` 才做 t3 歌词对齐），完成后转 `analysis-draft`，失败转 `analysis-failed`（`analysis.error` 说明原因，使用 `song_analysis_retry` 重试） |
-| `project_create_from_bgm` | `audioPath` | `project_create_from_audio` 的别名（保留兼容） |
+| `project_list` | — | 本地工程列表：`id / name / status / shots / duration / revision / createdAt`（按创建时间倒序）。修改/继续已有片子先用它找回工程 |
+| `project_create_from_audio` | `audioPath` | **新建**工程，只在用户明确要新片时调用。可选 `name / lyricsText / lrcPath / language / stages`（`t0/t1/t3` 组合，必须含 `t1`）/ `allowDuplicate`。同一音频已有工程时返回 409 与 `existingProjects: [{ id, name, updatedAt }]`，改用已有工程；用户确实要同音频再建一个才传 `allowDuplicate: true`。指纹命中 pdoom-video 原 BGM → 参考导入（行为不变）；否则新歌工程 `analysis-pending`：复制通用引擎（不含绑定原曲歌词的场景），后台自动分析（有 `lyricsText/lrcPath` 才做 t3 歌词对齐），完成后转 `analysis-draft`，失败转 `analysis-failed`（`analysis.error` 说明原因，使用 `song_analysis_retry` 重试） |
+| `project_create_from_bgm` | `audioPath` | `project_create_from_audio` 的别名（保留兼容），可选 `name / allowDuplicate` |
 | `project_get` | `projectId` | 完整工程：镜头、转场、意见、版本、输出规格。默认只返回歌曲摘要，`includeAnalysis: true` 返回完整词级歌词/节拍/包络 |
-| `project_director_get` | `projectId` | 读取导演方案、工程 `revision`、当前 `phase/actions/blockers/review/exportReady` 与规则。action 的稳定 `id` 用作 claim 的 actionId，含目标版本、scope、工具和原因 |
-| `project_director_next` | `projectId` | 返回当前下一步待办集合，结构同导演状态；按 action 顺序推进。analysis/retry/direction/plan action 不能 claim，先直接调用对应工具 |
-| `project_director_submit` | `projectId, expectedProjectRevision, director, author?` | 保存 brief/style/rhythm/shots/maxRepairs 并递增导演版本；规划前 shots 可为空，规划后必须补齐每镜 brief。详细结构和全量校验见 §6；默认 author=mcp，不直接改镜头 |
+| `project_director_get` | `projectId` | 读取导演方案、工程 `revision`、当前 `phase/actions/blockers/review/exportReady/resumable` 与规则。action 的稳定 `id` 用作 claim 的 actionId，含目标版本、scope、工具和原因 |
+| `project_director_next` | `projectId` | 与 `project_director_get` 调同一服务端点、返回同一份导演状态；保留为“接下来做什么”的入口名，按 `actions` 顺序推进。analysis/retry/direction/plan action 不能 claim，先直接调用对应工具 |
+| `project_director_submit` | `projectId, expectedProjectRevision, director` | 保存 brief/style/rhythm/shots/maxRepairs 并递增导演版本；规划前 shots 可为空，规划后必须补齐每镜 brief。详细结构和全量校验见 §6；记为 author=mcp（不可自选），不直接改镜头 |
 | `project_director_claim` | `projectId, actionId, owner, leaseSeconds?` | claim 制作/验证/审片/导出待办；leaseSeconds 为30..900、默认300。同 owner 有效续租返回原 token；返回 `operation.attemptToken`，制作镜头/转场写入时必须携带该 token |
 | `project_director_complete` | `projectId, actionId, attemptToken, outcome` | outcome 为 done/failed；可带 jobIds（≤100，默认[]）和 error。校验租约、当前目标、receipt 与真实任务。制作 done 可空 jobs，验证/采样/导出 done 需对应完成 job；failed 必须引用真实失败 job，见 §6 |
 | `project_director_dispatch` | `projectId, actionIds, attemptTokens` | 1..100个唯一 actionId，token 数组按位置对应、先 claim；只入队 validate/validate-transition/stills/filmstrip/rhythm/contact-sheet/export，返回 jobs 并复用同版本任务；不创作或提交自评 |
@@ -92,7 +97,7 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 | `song_lyrics_submit` | `projectId, expectedInputRevision, lyrics` | 整层替换歌词：`{ lines: [{ text, start, end, words: [{ w, start, end }] }], language? }`（秒）。经契约校验（时间在曲长内、行按时间排列、词在行内）后刷新引擎数据；工程回到 `analysis-draft`，需再次确认。agent 修正记 `humanConfirmed: false` |
 | `song_analysis_confirm` | `projectId` | 确认分析，`analysis-draft → analysis-confirmed`。agent 可调用，记为 `confirmedBy: mcp`；调用前先 `song_analysis_get` 核对，明显误听或节拍偏差先修正 |
 | `song_analysis_retry` | `projectId` | 仅 `analysis-failed` 可重试，重新排队分析并转 `analysis-pending`；等 `project_get` 返回 draft 或失败。不用于重复启动 pending/draft/planned 工程 |
-| `song_analysis_patch` | `projectId, expectedInputRevision, patch` | 仅规划前的 `analysis-draft / analysis-confirmed` 可用；以工程版本整层替换 `patch.rhythm` 和/或 `patch.sections`，不支持局部 bpm/offset 指令或其他层。可选 `author: mcp/human`，默认 mcp；保留 before/after 数据与来源，刷新引擎数据/指纹，回到 `analysis-draft` 并清除确认，须重读再 confirm |
+| `song_analysis_patch` | `projectId, expectedInputRevision, patch` | 仅规划前的 `analysis-draft / analysis-confirmed` 可用；以工程版本整层替换 `patch.rhythm` 和/或 `patch.sections`，不支持局部 bpm/offset 指令或其他层。记为 author=mcp（不可自选）；保留 before/after 数据与来源，刷新引擎数据/指纹，回到 `analysis-draft` 并清除确认，须重读再 confirm |
 | `project_plan_submit` | `projectId, expectedInputRevision` | 仅 `analysis-confirmed` 可用。`plan: [{ lineText \| sectionIndex \| t, title?, prompt?, id? }]`：每项是一刀的**锚点**，服务端推导切点（歌词行 → 行首词前最近拍；`t` 量化到帧且不得切在词中间），首刀强制 0、末镜到曲尾；可带 `reasoning`。省略 `plan` → 确定性兜底（每段一镜，`source: fallback-deterministic`，不算 AI 创作）。成功后工程 → `planned`，镜头 `module: null`、`needs-generation`，相邻镜头生成默认硬切转场 |
 
 ### 镜头
@@ -101,8 +106,8 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 |---|---|---|
 | `project_shot_lyrics` | `projectId, shotId` | 镜头窗口内词级歌词、`instrumental` 标记、已有 `lyricPlan` |
 | `project_shot_source` | `projectId, shotId` | `{ shot, code, contract, lyricContext, source }`：当前真实 TS 源码与完整引擎契约（ENGINE.md） |
-| `project_shot_update` | `projectId, shotId, expectedInputRevision, patch`（导演制作 action 另必带 `attemptToken`） | patch 仅允许 `title / prompt / params / lyricPlan / locked`。改 `prompt` 或 `lyricPlan` → `needs-generation`；改 `params` → `needs-validation`；三者都会让已响应意见退回 `pending`。导演 token 通过 receipt 绑定本次目标提交 |
-| `project_shot_submit` | `projectId, shotId, expectedInputRevision, code`（导演制作 action 另必带 `attemptToken`） | 提交**完整**场景文件（无 markdown 围栏），可带 `summary`、`feedbackResponses: [{ feedbackId, outcome: addressed\|partial, how }]`（优先）或兼容参数 `addressedFeedbackIds`（视为 addressed、how 为空；同 ID 以 feedbackResponses 为准）。生成 `vg-<sha256>` 不可变模块，状态 → `needs-validation`。AI 不能接受意见 |
+| `project_shot_update` | `projectId, shotId, expectedInputRevision, patch`（导演制作 action 另必带 `attemptToken`） | patch 仅允许 `title / prompt / params / lyricPlan`（不含 `locked`，AI 不能改锁）。改 `prompt` 或 `lyricPlan` → `needs-generation`；改 `params` → `needs-validation`；三者都会让已响应意见退回 `pending`。只影响这一镜的导出缓存。导演 token 通过 receipt 绑定本次目标提交 |
+| `project_shot_submit` | `projectId, shotId, expectedInputRevision, code`（导演制作 action 另必带 `attemptToken`） | 提交**完整**场景文件（无 markdown 围栏）给**这一个**镜头，可带 `summary`、`feedbackResponses: [{ feedbackId, outcome: addressed\|partial, how }]`（优先）或兼容参数 `addressedFeedbackIds`（视为 addressed、how 为空；同 ID 以 feedbackResponses 为准）。生成 `vg-<sha256>` 不可变模块，状态 → `needs-validation`。多镜共用一份源码时只提交给要改的镜头（见 §2 硬规则 8）。AI 不能接受意见 |
 | `project_feedback_add` | `projectId, shotId, expectedInputRevision, text` | 新增镜头意见（≤8000 字符），可带 `anchor`（`t/range/lyricElementId/region/aspect`，服务端校验窗口与元素引用）与 `preserve`（≤12 条），记为 `author: mcp`（代人转述时在正文注明）；首条未接受意见时冻结 `reviewBaseline`；镜头 → `needs-generation` |
 
 `lyricPlan` 结构：`{ summary, elements: [{ name, quote, meaning, treatment, kind?: entity|action|metaphor, cueWord? }] }`。`quote` 必须是本镜头窗口内的真实歌词，`cueWord` 必须在该句中，否则拒绝。有歌词的镜头至少一个元素。
@@ -112,8 +117,8 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 | 工具 | 必填参数 | 作用 / 返回 |
 |---|---|---|
 | `project_transition_get` | `projectId, transitionId` | 转场节点、意见、配置、前后镜头元素方案、准确时间窗 |
-| `project_transition_update` | `projectId, transitionId, expectedInputRevision, patch` | patch 仅 `intent / locked`；新 intent → `needs-generation`，需随后 configure |
-| `project_transition_configure` | `projectId, transitionId, expectedInputRevision, config`（导演制作 action 另必带 `attemptToken`） | `config: { mode, duration ≤1.5, easing, direction }`，可带 `feedbackResponses`（同 `project_shot_submit`）或兼容参数 `addressedFeedbackIds`。过渡在切点后发生，不改全曲时长与歌词时序。AI 不能接受意见 |
+| `project_transition_update` | `projectId, transitionId, expectedInputRevision, patch`（导演工程另必带 `attemptToken`） | patch 仅 `intent`（不含 `locked`，AI 不能改锁）；新 intent → `needs-generation`，需随后 configure。记为 author=mcp |
+| `project_transition_configure` | `projectId, transitionId, expectedInputRevision, config`（导演制作 action 另必带 `attemptToken`） | `config: { mode, duration ≤1.5, easing, direction, effectId?, params? }`；`mode` 为 cut/dissolve/wipe/dip/effect，`mode: effect` 时给 `effectId`（特效箱转场）与可选 `params`。可带 `feedbackResponses`（同 `project_shot_submit`）或兼容参数 `addressedFeedbackIds`。过渡在切点后发生，不改全曲时长与歌词时序。AI 不能接受意见 |
 | `project_transition_feedback_add` | `projectId, transitionId, expectedInputRevision, text` | 新增转场意见（可带 `anchor/preserve`，锚点窗口为前后镜头合并窗口），同时冻结两侧镜头版本 |
 | `project_transition_validate` | `projectId, transitionId` | 后台抽检切点前后 5 帧，返回 job |
 
@@ -123,7 +128,7 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 |---|---|---|
 | `project_feedback_inbox` | — | 可选 `projectId`、`status`（默认 `pending`；`open` 为全部未接受）。agent 的入口：返回每条意见的目标、时间窗、锚点、保留项、上下文摘要与 `nextStep`；不传 projectId 时汇总所有本地工程。AI 不能接受意见 |
 | `project_feedback_ask` | `projectId, targetKind, targetId, feedbackId, question` | 意图含糊时向人提问：意见转 `needs-clarification`，人回复后回 `pending`；提问不改输入版本。AI 不能替人回复 |
-| `project_stills` | `projectId`（另需 `shotId` 或 `transitionId`） | 可选 `times`（≤6 个、须在目标时间窗内；默认 = 未接受意见锚点 t + 窗口 0/0.5/1）、`version: current\|before-feedback`、`width`（320..1920，默认 960）。后台真实引擎渲染静帧，返回 job；完成后 `project_job_get` 以 MCP image 内容（base64 PNG）返回并附 `artifacts/<key>.png` 路径。缓存键 = 版本输入 + t + 宽度。AI 不能接受意见 |
+| `project_stills` | `projectId`（另需 `shotId` 或 `transitionId`） | 可选 `times`（≤6 个、须在目标时间窗内；默认 = 未接受意见锚点 t + 窗口 0/0.5/1）、`version: current\|before-feedback`、`width`（320..1920，默认 960；给自己看建议 ≤1024）、`embedImages`。后台真实引擎渲染静帧，返回 job；完成后 `project_job_get` 以 MCP image 内容（base64 PNG）返回并附 `artifacts/<key>.png` 路径。缓存键 = 版本输入 + t + 宽度。AI 不能接受意见 |
 
 ### 预览、验证、导出、任务
 
@@ -131,8 +136,8 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 |---|---|---|
 | `project_preview` | `projectId` | 可选 `shotId / transitionId / version: current\|before-feedback`。返回本机真实引擎播放器 `url` 与 `range`。供有浏览器能力的人/agent 查看 |
 | `project_validate` | `projectId, shotId` | 后台编译 + 5 时间点抽检，返回 job；完成后镜头 `validation.thumb` 指向 `artifacts/<key>.png`（**单张**缩略图） |
-| `project_render` | `projectId` | 可选 `fps: 24/30/60`、`samples: 1/4/12`。后台导出完整 MP4，冻结当前版本，命中分段缓存 |
-| `project_job_get` | `projectId` | 可选 `jobId`；省略则列出最近任务。看 `status / progress / error / result`。带 `waitSeconds`（≤50）则阻塞到任务结束或超时，不用反复轮询 |
+| `project_render` | `projectId` | 可选 `fps: 24/30/60`、`samples: 1/4/12`。后台导出完整 MP4，冻结当前版本，按镜头命中分段缓存。完成后 `result.cacheSummary: { reused, rendered, reasons }`（reasons 为未命中原因计数），每个 `reports[]` 带 `cached` 与 `missReason`（数组，取值如 `new / code / shot / assets / dependency / engine / host / browser / fps / samples / encoder`）；如实告诉用户哪些镜头重渲了、为什么 |
+| `project_job_get` | `projectId` | 可选 `jobId`；省略则列出最近任务（此时 `waitSeconds` 被忽略）。看 `status / progress / error / result`。带 `jobId` + `waitSeconds`（≤50）则阻塞到任务结束或超时，不用反复轮询；`embedImages: false` 只返回图片路径 |
 | `project_job_cancel` | `projectId, jobId` | 取消排队或运行中的任务 |
 
 ### 节奏与画面感知（LLM-AE，AE-01～05）
@@ -142,7 +147,7 @@ MCP server 只是工程服务的本机客户端：所有 `project_*` 工具经 H
 | 工具 | 必填参数 | 作用 / 返回 |
 |---|---|---|
 | `song_cue_sheet` | `projectId` | 按小节的文本节奏表：时间、段落（▶段首）、能量 1–5（小节 rms 在全曲 p5–p95 中的位置）、每拍 2 格鼓点型（`K` kick / `S` snare / `X` 同时 / `.`）、歌词、`↑↑` 爆发 / `↓↓` 回落 / `⇗` 蓄力、现有切点 `✂n(转场)@t`。可选 `start / end`。无下拍按 4 拍推算、无拍点按 2 秒分块（都会在表头注明） |
-| `project_filmstrip` | `projectId` | 一段连续帧拼成一张网格图（≤24 格），每格标 `时间 小节.拍 ●下拍 K S “词”`，下拍帧橙框。范围：`shotId` / `transitionId`（切点前后各 1 秒）/ `start,end` / 全片；取帧：默认均匀 6–24 帧、`around: t` + `frames`（前后各 1–11 帧，看冲击起势与衰减）、`sampleFps`。可选 `thumbWidth`（160–480）、`columns` |
+| `project_filmstrip` | `projectId` | 一段连续帧拼成一张网格图（≤24 格），每格标 `时间 小节.拍 ●下拍 K S “词”`，下拍帧橙框。范围：`shotId` / `transitionId`（切点前后各 1 秒）/ `start,end` / 全片；取帧：默认均匀 6–24 帧、`around: t` + `frames`（前后各 1–11 帧，看冲击起势与衰减）、`sampleFps`。可选 `thumbWidth`（160–480）、`columns`、`waitSeconds`、`embedImages` |
 | `project_contact_sheet` | `projectId` | 全片每镜头 1–3 帧（`ratios`，默认 `[0.45]`）拼图，标序号/标题/时间/段落/状态；无源码镜头画占位。看全片一致性、色彩推进、镜头雷同、强弱起伏 |
 | `project_rhythm_report` | `projectId` | 顺序渲染目标时间段（范围参数同 filmstrip；`sampleFps` 10–60，默认 ≤30 秒用工程帧率、更长用 15），返回文本报告 + 对照图：下拍/强 kick/强 snare 命中率与中位偏移（正=画面滞后）、高能量小节下拍命中率、画面峰在拍上的比例、与鼓点包络的相关与最佳偏移、死区、闪烁（线性亮度近似 WCAG，>3 次/秒告警）、切点离拍距离、逐小节“音乐能量 vs 画面运动”。报告分「问题（通常该修）」与「风格提示（确认是否有意）」。全片 15fps 约 5–6 分钟（瓶颈是 1080p 真实渲染），优先按镜头/段落跑；采样帧有缓存，同一版本重跑很快 |
 | `craft_guide` | — | shotcraft 技法库节选（≤12k 字符）。`topic`：`shots / transitions / effects / media-styles / pipeline / platform`，省略为总览；`query` 按关键词筛小节。不需要工程服务 |
@@ -242,6 +247,8 @@ create_from_audio → director_next / project_get → song_analysis_get + cue_sh
 | `反馈 ID 必须来自本镜头尚未接受的意见` | ID 拼错、属于其他镜头，或已被接受 |
 | 拒绝后镜头是 `needs-generation` | 人拒绝候选会恢复修改前代码，但仍需按意见重新改写 |
 | `project_render` 返回 409 | 还有未接受意见、待改写镜头或待配置转场；不要试图绕过 |
+| `project_create_from_audio` 返回 409 + `existingProjects` | 这段音频已有工程。用户要改的就是它：用列出的 id 继续；只有用户明确要新工程才带 `allowDuplicate: true` |
+| 只改了一镜，导出却全片重渲 | 看 `result.cacheSummary.reasons` 与 `reports[].missReason`：`code` 多半是把共用源码重新提交给了所有镜头；`engine/host/browser` 是引擎快照、渲染宿主代码或浏览器升级，属于预期的全片失效；`fps/samples` 是导出规格变了 |
 | 场景运行报错或黑帧 | 先看 `project_job_get` 的 `error`；引擎每帧错误会中止，不会静默黑帧 |
 | `project_stills` 对 `needs-generation` 镜头也能出图 | 预期行为：意见加入即标记待改写，但当前源码仍可渲染——agent 改写前正要看锚点处现状 |
 | stills 图片内容缺失（只有路径） | MCP 进程的 `VIDEOGRAPH_PROJECTS` 与工程服务不一致，读不到产物文件；对齐 env 后重试 |

@@ -1,7 +1,7 @@
 ---
 name: shotcraft
-version: 1.3.1
-toolset: 2026-10-03
+version: 1.4.0
+toolset: 2026-10-05
 description: 确定性节拍驱动代码视频的通用分镜/转场/特效/媒介风格技法库（从 pdoom-video 及 25 个 Opus 5.5 视频开源仓库蒸馏，平台无关）。当用户要为生成式音乐视频/动态影像设计分镜、转场、特效或视觉媒介风格（刻线版画、水彩笔刷、risograph、halftone、剪纸、火花、逐词卡拉OK、字体猛击、无限晶格、Droste、倒带循环…），要复刻某种视觉手法，或在使用 VideoGraph 平台（videograph MCP 全引擎管线 / VideoGraph 工坊 draw(ctx,f,api) mini-engine 队列）制作 PV 时使用。关键词：分镜、转场、特效、镜头卡、PV、卡拉OK、刻线、版画、riso、笔刷、媒介模拟、spark、videograph、VideoGraph、工坊、opus。
 ---
 

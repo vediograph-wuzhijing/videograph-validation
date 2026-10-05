@@ -1,7 +1,5 @@
 // mcp-tools.ts — MCP 只作为本地工程服务的入口，不直接写数据库/工程文件。
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { withFeedbackResponsesSchema } from './mcp-feedback-tools.ts';
+import { withFeedbackResponsesSchema, serviceFetch, ServiceError } from './mcp-feedback-tools.ts';
 
 const properties = { projectId: { type: 'string' }, shotId: { type: 'string' }, transitionId: { type: 'string' }, expectedInputRevision: { type: 'integer', minimum: 0 }, attemptToken: { type: 'string', description: '导演 claim 返回的 token；镜头 update/submit、转场 configure 时带上，以记录本次操作提交凭据。' } };
 const schema = (extra: Record<string, unknown>, required: string[]) => ({ type: 'object', properties: { ...properties, ...extra }, required });
@@ -11,46 +9,46 @@ const anchorSchema = { type: 'object', description: '定位锚点：t/range 落�
   lyricElementId: { type: 'string' }, region: { type: 'object', properties: { x: { type: 'number' }, y: { type: 'number' }, w: { type: 'number' }, h: { type: 'number' } } },
   aspect: { type: 'string', enum: ['composition', 'motion', 'typography', 'color', 'timing', 'lyrics', 'other'] } } };
 const preserveSchema = { type: 'array', items: { type: 'string' }, description: '必须保留的内容（≤12 条，每条 ≤300 字）' };
+// schema 已去掉 locked，但客户端不一定校验 additionalProperties；锁定只能由人改，这里再拦一次。
+const hasLockedKey = (patch: unknown) => !!patch && typeof patch === 'object' && 'locked' in patch;
+const allowDuplicateProperty = { type: 'boolean', description: '仅当用户明确要求用同一音频再建一个新工程时为 true；默认遇到已有工程返回 409' };
 export const projectToolDefinitions = withFeedbackResponsesSchema([
-  { name: 'project_list', description: '列出本地可恢复的视频工程。', inputSchema: schema({}, []) },
-  { name: 'project_create_from_audio', description: '从本地音频创建工程。指纹匹配 pdoom-video 原 BGM 时为参考导入；否则新建歌曲工程（status=analysis-pending），后台自动分析节拍/段落（t1），提供 lyricsText/lrcPath 时对齐歌词（t3）。轮询 project_get 直到 status=analysis-draft（失败为 analysis-failed）。', inputSchema: schema({ audioPath: { type: 'string' }, name: { type: 'string' }, lyricsText: { type: 'string', description: '歌词原文（可选，提供后做词级对齐）' }, lrcPath: { type: 'string' }, language: { type: 'string', description: '语言代码，如 zh / en' }, stages: { type: 'array', items: { type: 'string', enum: ['t0', 't1', 't3'] } } }, ['audioPath']) },
-  { name: 'project_create_from_bgm', description: 'project_create_from_audio 的别名（保留兼容）。', inputSchema: schema({ audioPath: { type: 'string' }, name: { type: 'string' } }, ['audioPath']) },
+  { name: 'project_list', description: '列出本地已有的视频工程（id、名称、状态、镜头数、时长、创建时间，按创建时间倒序）。用户要求修改、继续或导出某个片子时，先用它找到已有工程并沿用其 id，不要新建工程。', inputSchema: schema({}, []) },
+  { name: 'project_create_from_audio', description: '从本地音频创建**新**工程。只在用户明确要做一部新片时调用；修改/继续已有片子先 project_list 找回原工程。同一音频已有工程时服务返回 409 并列出 existingProjects，应改用其中的工程；只有用户明确要求同一音频再建一个新工程时才传 allowDuplicate=true。指纹匹配 pdoom-video 原 BGM 时为参考导入；否则新建歌曲工程（status=analysis-pending），后台自动分析节拍/段落（t1），提供 lyricsText/lrcPath 时对齐歌词（t3）。轮询 project_get 直到 status=analysis-draft（失败为 analysis-failed）。', inputSchema: schema({ audioPath: { type: 'string' }, name: { type: 'string' }, lyricsText: { type: 'string', description: '歌词原文（可选，提供后做词级对齐）' }, lrcPath: { type: 'string' }, language: { type: 'string', description: '语言代码，如 zh / en' }, stages: { type: 'array', items: { type: 'string', enum: ['t0', 't1', 't3'] } }, allowDuplicate: allowDuplicateProperty }, ['audioPath']) },
+  { name: 'project_create_from_bgm', description: 'project_create_from_audio 的别名（保留兼容）；同样只在用户明确要新工程时调用。', inputSchema: schema({ audioPath: { type: 'string' }, name: { type: 'string' }, allowDuplicate: allowDuplicateProperty }, ['audioPath']) },
   { name: 'song_analysis_get', description: '读取新歌工程的分析（videograph-analysis/v2）。默认层 audio/rhythm/sections/lyrics；envelopes/onsets 需在 layers 中显式请求。可按 startTime/endTime（秒）过滤。返回 inputRevision 供后续写操作。', inputSchema: schema({ startTime: { type: 'number' }, endTime: { type: 'number' }, layers: { type: 'array', items: { type: 'string', enum: ['audio', 'rhythm', 'sections', 'lyrics', 'envelopes', 'onsets'] } } }, ['projectId']) },
   { name: 'song_lyrics_submit', description: '整层替换歌词（v2 结构：{ lines: [{ text, start, end, words: [{ w, start, end }] }] }，时间单位秒），用于修正误听/补词。经契约校验后工程回到 analysis-draft，需再次 song_analysis_confirm。', inputSchema: schema({ lyrics: { type: 'object' } }, ['projectId', 'expectedInputRevision', 'lyrics']) },
   { name: 'song_analysis_confirm', description: '确认分析：analysis-draft → analysis-confirmed，之后才能规划镜头。agent 可调用（记为 confirmedBy: mcp）；调用前先用 song_analysis_get 核对节拍/歌词/段落，明显误听先用 song_lyrics_submit 修正。', inputSchema: schema({}, ['projectId']) },
   { name: 'song_analysis_retry', description: '重新排队 analysis-failed 的新歌分析；失败时不伪造分析结果。', inputSchema: schema({}, ['projectId']) },
-  { name: 'song_analysis_patch', description: '在规划前以工程版本修正 rhythm 或 sections 整层；成功后回到 analysis-draft，必须重新读取并确认。', inputSchema: schema({ patch: { type: 'object' }, author: { type: 'string', enum: ['mcp', 'human'] } }, ['projectId', 'expectedInputRevision', 'patch']) },
+  { name: 'song_analysis_patch', description: '在规划前以工程版本修正 rhythm 或 sections 整层；成功后回到 analysis-draft，必须重新读取并确认。记为 AI 修正。', inputSchema: schema({ patch: { type: 'object' } }, ['projectId', 'expectedInputRevision', 'patch']) },
   { name: 'project_plan_submit', description: '仅 analysis-confirmed 可用。plan: [{ lineText | sectionIndex | t, title?, prompt?, id? }]，每项是一刀的锚点，服务端吸附到拍点且不切词，覆盖全曲；省略 plan 则用确定性兜底（每段一镜，标注非 AI 创作）。成功后工程 → planned，镜头 → needs-generation（project_shot_source 返回通用模板作为起点）。', inputSchema: schema({ plan: { type: 'array', items: { type: 'object' } }, reasoning: { type: 'string' } }, ['projectId', 'expectedInputRevision']) },
   { name: 'project_get', description: '读取工程、镜头版本与状态、BGM 分析来源；可选返回歌词/节拍分析。', inputSchema: schema({ includeAnalysis: { type: 'boolean' } }, ['projectId']) },
   { name: 'project_shot_lyrics', description: '读取目标镜头窗口内真实词级歌词与已有元素方案。先从歌词分析含义和具象/动作/隐喻元素，再用 project_shot_update 的 lyricPlan 保存引用、解释、视觉处理；引用会被校验。', inputSchema: schema({}, ['projectId', 'shotId']) },
   { name: 'project_shot_source', description: '读取某镜头当前真实 TypeScript 源码及完整原引擎契约（Scene 类、Three.js/GLSL/字体/后期）。修改时保留输入版本并通过 project_shot_submit 提交完整文件。', inputSchema: schema({}, ['projectId', 'shotId']) },
-  { name: 'project_shot_update', description: '以版本检查修改镜头提示词、参数或锁定状态。提示词修改后必须重新提交代码；锁定镜头必须先解锁。', inputSchema: schema({ patch: { type: 'object', properties: { title: { type: 'string' }, prompt: { type: 'string' }, params: { type: 'object' }, lyricPlan: { type: 'object', properties: { summary: { type: 'string' }, elements: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, quote: { type: 'string' }, meaning: { type: 'string' }, treatment: { type: 'string' }, kind: { type: 'string', enum: ['entity', 'action', 'metaphor'] }, cueWord: { type: 'string' } }, required: ['name', 'quote', 'meaning', 'treatment'] } } }, required: ['summary', 'elements'] }, locked: { type: 'boolean' } }, additionalProperties: false } }, ['projectId', 'shotId', 'expectedInputRevision', 'patch']) },
-  { name: 'project_shot_submit', description: '提交完整镜头 TypeScript 源码（不带 markdown 代码围栏）；保存不可变新文件并标记待验证。不会覆盖其他镜头或原参考仓库。AI 不能接受意见：采用/拒绝由人在界面完成。', inputSchema: schema({ code: { type: 'string' }, summary: { type: 'string' }, addressedFeedbackIds: { type: 'array', items: { type: 'string' }, description: '本次源码明确响应的 pending 反馈 ID（兼容参数）；优先用 feedbackResponses 逐条说明。仅标为已响应，必须由用户在界面确认采用。' } }, ['projectId', 'shotId', 'expectedInputRevision', 'code']) },
+  { name: 'project_shot_update', description: '以版本检查修改单个镜头的标题、提示词、参数或歌词元素方案；只影响这一镜（导出时只有它重渲）。提示词修改后必须重新提交代码。锁定只能由人在界面解除，AI 不能改锁。', inputSchema: schema({ patch: { type: 'object', properties: { title: { type: 'string' }, prompt: { type: 'string' }, params: { type: 'object' }, lyricPlan: { type: 'object', properties: { summary: { type: 'string' }, elements: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, quote: { type: 'string' }, meaning: { type: 'string' }, treatment: { type: 'string' }, kind: { type: 'string', enum: ['entity', 'action', 'metaphor'] }, cueWord: { type: 'string' } }, required: ['name', 'quote', 'meaning', 'treatment'] } } }, required: ['summary', 'elements'] } }, additionalProperties: false } }, ['projectId', 'shotId', 'expectedInputRevision', 'patch']) },
+  { name: 'project_shot_submit', description: '把完整场景 TypeScript 源码（不带 markdown 代码围栏）提交给**这一个**镜头；保存不可变新文件并标记待验证，不会覆盖其他镜头或原参考仓库。导出缓存按镜头计（源码哈希+参数+后期栈+镜头素材）：只提交给要改的镜头，其余镜头保持原模块就会命中缓存。多镜共用一份场景源码时，不要把改过的共用文件重新提交给所有镜头——那会让全片重渲。AI 不能接受意见：采用/拒绝由人在界面完成。', inputSchema: schema({ code: { type: 'string' }, summary: { type: 'string' }, addressedFeedbackIds: { type: 'array', items: { type: 'string' }, description: '本次源码明确响应的 pending 反馈 ID（兼容参数）；优先用 feedbackResponses 逐条说明。仅标为已响应，必须由用户在界面确认采用。' } }, ['projectId', 'shotId', 'expectedInputRevision', 'code']) },
   { name: 'project_feedback_add', description: '把人的针对性修改意见添加为目标镜头的独立反馈节点，可带 anchor（时间/歌词元素/画面区域/方面）与 preserve（必须保留项）。保留原始 prompt 和修改前版本；只有本镜头待改写。', inputSchema: schema({ text: { type: 'string' }, anchor: anchorSchema, preserve: preserveSchema }, ['projectId', 'shotId', 'expectedInputRevision', 'text']) },
   { name: 'project_shot_effects', description: '设置镜头的特效箱后期栈（按顺序叠加，最多 4 层，空数组清除）：effects: [{ id, params?, bindings? }]。id 来自 effect_search（kind=post），params 覆盖默认值，bindings 覆盖节拍绑定（{ 参数: { to: beat|kick|bar|energy, amount } }）。代码与参数冻结进工程，镜头转为待验证；先 effect_preview 看效果。导演工程需带 attemptToken。', inputSchema: schema({ effects: { type: 'array', maxItems: 4, items: { type: 'object', properties: { id: { type: 'string' }, params: { type: 'object' }, bindings: { type: 'object' } }, required: ['id'] } } }, ['projectId', 'shotId', 'expectedInputRevision', 'effects']) },
   { name: 'project_transition_get', description: '读取相邻镜头之间的转场节点、指导意见、效果配置、前后镜头元素方案和准确时间窗。', inputSchema: schema({}, ['projectId', 'transitionId']) },
-  { name: 'project_transition_update', description: '编辑转场指导或锁定。新的指导标为待配置，不假装效果已改变。', inputSchema: schema({ patch: { type: 'object', properties: { intent: { type: 'string' }, locked: { type: 'boolean' } }, additionalProperties: false } }, ['projectId', 'transitionId', 'expectedInputRevision', 'patch']) },
+  { name: 'project_transition_update', description: '编辑转场指导意图。新的指导标为待配置，不假装效果已改变。锁定只能由人在界面解除，AI 不能改锁。导演工程需带 attemptToken。', inputSchema: schema({ patch: { type: 'object', properties: { intent: { type: 'string' } }, additionalProperties: false } }, ['projectId', 'transitionId', 'expectedInputRevision', 'patch']) },
   { name: 'project_transition_configure', description: '提交转场效果参数：cut/dissolve/wipe/dip/effect、秒数、easing(linear/smooth)、direction(left/right)。mode=effect 时给 effectId（特效箱里的转场，如 gl-directionalwarp，先 effect_search kind=transition 挑选、effect_preview 看效果）与可选 params；代码与参数冻结进工程。过渡在切点后发生，保持全曲时长与歌词时序；新配置需预览验证。AI 不能接受意见：采用/拒绝由人在界面完成。', inputSchema: schema({ config: { type: 'object', properties: { mode: { type: 'string', enum: ['cut', 'dissolve', 'wipe', 'dip', 'effect'] }, duration: { type: 'number', minimum: 0, maximum: 1.5 }, easing: { type: 'string', enum: ['linear', 'smooth'] }, direction: { type: 'string', enum: ['left', 'right'] }, effectId: { type: 'string' }, params: { type: 'object' } }, additionalProperties: false }, addressedFeedbackIds: { type: 'array', items: { type: 'string' } } }, ['projectId', 'transitionId', 'expectedInputRevision', 'config']) },
   { name: 'project_transition_feedback_add', description: '添加只针对该转场的人工修改意见（可带 anchor/preserve），保留之前配置和前后镜头版本；需要明确响应并由人在界面采用。', inputSchema: schema({ text: { type: 'string' }, anchor: anchorSchema, preserve: preserveSchema }, ['projectId', 'transitionId', 'expectedInputRevision', 'text']) },
   { name: 'project_transition_validate', description: '后台抽检转场前、切点、混合中和结束后的五帧；结果绑定转场及两侧镜头版本，不代替审美确认。', inputSchema: schema({}, ['projectId', 'transitionId']) },
   { name: 'project_preview', description: '打开指定工程冻结版本的本机真实引擎预览，返回 URL。可指定 shotId 与 before-feedback 查看修改前版本；供人和 agent 视觉检查，不代表自动认可。', inputSchema: schema({ version: { type: 'string', enum: ['current', 'before-feedback'] } }, ['projectId']) },
   { name: 'project_validate', description: '后台验证指定真实镜头：加载引擎、编译并抽检 5 个时间点，保存静帧与诊断；返回 jobId，通过 project_job_get 查询，不代表逐帧/审美通过。', inputSchema: schema({}, ['projectId', 'shotId']) },
-  { name: 'project_render', description: '后台导出完整 PV MP4：冻结版本，按镜头逐帧渲染、复用内容缓存、封装完整 BGM。返回任务，不阻塞 MCP 会话。', inputSchema: schema({ fps: { type: 'integer', enum: [24, 30, 60] }, samples: { type: 'integer', enum: [1, 4, 12] } }, ['projectId']) },
-  { name: 'project_job_get', description: '查询后台验证/导出/画面分析任务进度、错误、缓存命中与产物地址；省略 jobId 列出工程最近任务。给 waitSeconds（≤50，MCP 客户端常见超时 60 秒）则阻塞等待到任务结束或超时，省去反复轮询。', inputSchema: schema({ jobId: { type: 'string' }, waitSeconds: { type: 'integer', minimum: 0, maximum: 50 } }, ['projectId']) },
+  { name: 'project_render', description: '后台导出完整 PV MP4：冻结版本，按镜头逐帧渲染、复用内容缓存、封装完整 BGM。返回任务，不阻塞 MCP 会话。完成后 result.cacheSummary 给出复用/重渲镜头数与原因，reports[].missReason 说明每个重渲镜头为什么没命中缓存；如实告诉用户。', inputSchema: schema({ fps: { type: 'integer', enum: [24, 30, 60] }, samples: { type: 'integer', enum: [1, 4, 12] } }, ['projectId']) },
+  { name: 'project_job_get', description: '查询后台验证/导出/画面分析任务进度、错误、缓存命中与产物地址；省略 jobId 列出工程最近任务（此时 waitSeconds 无效）。给 jobId + waitSeconds（≤50，MCP 客户端常见超时 60 秒）则阻塞等待到任务结束或超时，省去反复轮询。', inputSchema: schema({ jobId: { type: 'string' }, waitSeconds: { type: 'integer', minimum: 0, maximum: 50 }, embedImages: { type: 'boolean', description: '默认 true：完成的图片以 MCP image 返回（总量约 4MB 封顶）；false 只返回文件路径' } }, ['projectId']) },
   { name: 'project_job_cancel', description: '取消指定排队或正在执行的后台渲染任务。已经完成的产物保留。', inputSchema: schema({ jobId: { type: 'string' } }, ['projectId', 'jobId']) },
 ]);
 
 export async function callProjectTool(name: string, args: Record<string, unknown>) {
-  const base = process.env.VIDEOGRAPH_SERVICE_URL ?? 'http://127.0.0.1:5191';
-  const parsed = new URL(base);
-  if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(parsed.hostname)) throw new Error('工程服务必须是本机 HTTP 地址');
   const id = typeof args.projectId === 'string' ? encodeURIComponent(args.projectId) : '';
   const shotId = typeof args.shotId === 'string' ? encodeURIComponent(args.shotId) : '';
   const transitionId = typeof args.transitionId === 'string' ? encodeURIComponent(args.transitionId) : '';
   let path = `/projects/${id}`;
   let body: unknown;
   if (name === 'project_list') path = '/projects';
-  else if (name === 'project_create_from_bgm' || name === 'project_create_from_audio') { path = '/projects'; body = { audioPath: args.audioPath, name: args.name, lyricsText: args.lyricsText, lrcPath: args.lrcPath, language: args.language, stages: args.stages }; }
+  else if (name === 'project_create_from_bgm' || name === 'project_create_from_audio') { path = '/projects'; body = { audioPath: args.audioPath, name: args.name, lyricsText: args.lyricsText, lrcPath: args.lrcPath, language: args.language, stages: args.stages, allowDuplicate: args.allowDuplicate === true ? true : undefined }; }
   else if (name === 'song_analysis_get') {
     const query = new URLSearchParams();
     if (args.startTime !== undefined) query.set('startTime', String(args.startTime));
@@ -60,17 +58,17 @@ export async function callProjectTool(name: string, args: Record<string, unknown
   }
   else if (name === 'song_analysis_confirm') { path += '/song/analysis/confirm'; body = { author: 'mcp' }; }
   else if (name === 'song_analysis_retry') { path += '/song/analysis/retry'; body = {}; }
-  else if (name === 'song_analysis_patch') { path += '/song/analysis/patch'; body = { expectedInputRevision: args.expectedInputRevision, patch: args.patch, author: args.author ?? 'mcp' }; }
+  else if (name === 'song_analysis_patch') { path += '/song/analysis/patch'; body = { expectedInputRevision: args.expectedInputRevision, patch: args.patch, author: 'mcp' }; }
   else if (name === 'song_lyrics_submit') { path += '/song/lyrics'; body = { expectedInputRevision: args.expectedInputRevision, lyrics: args.lyrics, author: 'mcp' }; }
   else if (name === 'project_plan_submit') { path += '/plan'; body = { expectedInputRevision: args.expectedInputRevision, plan: args.plan, reasoning: args.reasoning, author: 'mcp' }; }
   else if (name === 'project_shot_lyrics') path += `/shots/${shotId}/lyrics`;
   else if (name === 'project_shot_source') path += `/shots/${shotId}/source`;
-  else if (name === 'project_shot_update') { path += `/shots/${shotId}`; body = { expectedInputRevision: args.expectedInputRevision, patch: args.patch, attemptToken: args.attemptToken, author: 'mcp' }; }
+  else if (name === 'project_shot_update') { if (hasLockedKey(args.patch)) throw new Error('AI 不能修改锁定状态：锁定/解锁由人在审阅室完成'); path += `/shots/${shotId}`; body = { expectedInputRevision: args.expectedInputRevision, patch: args.patch, attemptToken: args.attemptToken, author: 'mcp' }; }
   else if (name === 'project_shot_submit') { path += `/shots/${shotId}/source`; body = { expectedInputRevision: args.expectedInputRevision, code: args.code, summary: args.summary, addressedFeedbackIds: args.addressedFeedbackIds, feedbackResponses: args.feedbackResponses, attemptToken: args.attemptToken, author: 'mcp' }; }
   else if (name === 'project_feedback_add') { path += `/shots/${shotId}/feedback`; body = { expectedInputRevision: args.expectedInputRevision, text: args.text, anchor: args.anchor, preserve: args.preserve, author: 'mcp' }; }
   else if (name === 'project_shot_effects') { path += `/shots/${shotId}`; body = { expectedInputRevision: args.expectedInputRevision, patch: { effects: args.effects }, attemptToken: args.attemptToken, author: 'mcp' }; }
   else if (name === 'project_transition_get') path += `/transitions/${transitionId}`;
-  else if (name === 'project_transition_update') { path += `/transitions/${transitionId}`; body = { expectedInputRevision: args.expectedInputRevision, patch: args.patch, attemptToken: args.attemptToken }; }
+  else if (name === 'project_transition_update') { if (hasLockedKey(args.patch)) throw new Error('AI 不能修改锁定状态：锁定/解锁由人在审阅室完成'); path += `/transitions/${transitionId}`; body = { expectedInputRevision: args.expectedInputRevision, patch: args.patch, attemptToken: args.attemptToken, author: 'mcp' }; }
   else if (name === 'project_transition_configure') { path += `/transitions/${transitionId}/config`; body = { expectedInputRevision: args.expectedInputRevision, config: args.config, addressedFeedbackIds: args.addressedFeedbackIds, feedbackResponses: args.feedbackResponses, attemptToken: args.attemptToken, author: 'mcp' }; }
   else if (name === 'project_transition_feedback_add') { path += `/transitions/${transitionId}/feedback`; body = { expectedInputRevision: args.expectedInputRevision, text: args.text, anchor: args.anchor, preserve: args.preserve, author: 'mcp' }; }
   else if (name === 'project_transition_validate') { path += `/transitions/${transitionId}/validate`; body = {}; }
@@ -79,10 +77,14 @@ export async function callProjectTool(name: string, args: Record<string, unknown
   else if (name === 'project_render') { path += '/render'; body = { fps: args.fps, samples: args.samples }; }
   else if (name === 'project_job_get') path += `/jobs${args.jobId ? '/' + encodeURIComponent(String(args.jobId)) + (Number(args.waitSeconds) > 0 ? `?wait=${Math.min(50, Number(args.waitSeconds))}` : '') : ''}`;
   else if (name === 'project_job_cancel') { path += `/jobs/${encodeURIComponent(String(args.jobId))}/cancel`; body = {}; }
-  const token = readFileSync(process.env.VIDEOGRAPH_SERVICE_TOKEN_FILE ?? fileURLToPath(new URL('../../.cache/service-token', import.meta.url)), 'utf8');
-  const response = await fetch(base.replace(/\/$/, '') + path, { method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(120000) });
-  const result = await response.json() as Record<string, unknown>;
-  if (!response.ok) throw new Error(String(result.error ?? `HTTP ${response.status}`));
+  let result: Record<string, unknown>;
+  try { result = await serviceFetch(path, body); }
+  catch (error) {
+    if (error instanceof ServiceError && error.status === 409 && Array.isArray(error.details.existingProjects)) {
+      throw new ServiceError(`${error.message}。这段音频已经有工程，改用已有工程（用其 id 继续 project_get）；只有用户明确要求再建一个新工程时才带 allowDuplicate=true 重试。`, error.status, error.details);
+    }
+    throw error;
+  }
   if (result.song && !args.includeAnalysis) {
     const song = result.song as Record<string, unknown>;
     result.song = { song: song.song, bpm: song.bpm, duration: song.duration, sections: song.sections, note: 'includeAnalysis=true 可读取完整分析' };

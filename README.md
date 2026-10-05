@@ -9,7 +9,7 @@
 | THE LAST AUDIT · 独立创作 PV | AI 导演闭环实战：LLM 自主规划、写镜、自查、返修的原创 PV | 2′37″ / 22 镜 | [video/the-last-audit-pv.mp4](video/the-last-audit-pv.mp4) |
 | 拾愿长安 · 开篇宣传片 | 外部 AI 素材（生图→图生视频→配音）+ 本引擎合成的电影化短片 | 2′37″ / 21 镜 | [video/shiyuan-changan-pv.mp4](video/shiyuan-changan-pv.mp4) |
 | 西安 · 28 种艺术风格（长安三千年） | 一首歌遍历 28 种艺术风格的镜头合集 | 3′03″ / 30 镜 | [video/changan-art-styles.mp4](video/changan-art-styles.mp4) |
-| FX BOX 特效箱展示片 | 用特效箱 330 个动效串成的 60 镜展示片 | 4′00″ / 60 镜 | [video/fxbox-showreel.mp4](video/fxbox-showreel.mp4) |
+| FX BOX 特效箱展示片 | 用特效箱动效（制作时 330 个）串成的 60 镜展示片 | 4′00″ / 60 镜 | [video/fxbox-showreel.mp4](video/fxbox-showreel.mp4) |
 | Sella 平台宣传片 · EN/FR 双语 | 商业宣传片：买菜 App 双语产品介绍 | 1′00″ / 14 镜 | [video/sella-promo-enfr.mp4](video/sella-promo-enfr.mp4) |
 | ORÉLIA 香水广告 15 秒 | 虚构品牌商业广告，含原创配乐 | 0′15″ / 6 镜 | [video/orelia-15s.mp4](video/orelia-15s.mp4) |
 | VideoGraph 宣传片 20s / 60s | 用本工具为自身制作的宣传片 | 0′20″ + 1′00″ | [20s](video/videograph-promo-20s.mp4) / [60s](video/videograph-promo-60s.mp4) |
@@ -24,7 +24,7 @@ VideoGraph 是面向产品宣发与音乐人 PV 的本地 AI 视频工程工作�
 
 **已验证的关键数字**（出处与核对记录见 [ROADMAP.md](ROADMAP.md)）：
 
-- **50+ 个 MCP 工具**（server `videograph`，工具表见 [docs/MCP-GUIDE.md](docs/MCP-GUIDE.md)，有文档同步测试保证不过期）。
+- **51 个 MCP 工具**（server `videograph` 0.7.0，工具表见 [docs/MCP-GUIDE.md](docs/MCP-GUIDE.md)，有文档同步测试保证不过期）。
 - **特效箱 370 个动效**：245 个本项目原创 GLSL（`effects/box/`，逐文件记录 provenance）+ gl-transitions 125 个转场。
 - **AI 导演闭环实跑两轮**（《THE LAST AUDIT》）：方案 → 下一步 → 租约/回执 → 证据化自评 → 人工接受。
 - **22/22 分段缓存命中**（P(doom) 参考工程 22 镜 1080p 全片重导出）；宣传片 4 倍采样全片导出 6′17″ / 2′14″（本机实测）。
