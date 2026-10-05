@@ -716,6 +716,7 @@ MCP 与 UI 共用命令层。MCP 不是自动调用模型的魔法：未有 agen
 | FB-04 端到端验收 | ✅ ZCode 会话（QA-01 owner）2026-10-02 完成，全绿（约 1 分钟/轮） | `scripts/tests/collaboration/feedback-e2e.audit.mjs`、`helpers-fb04.mjs`（另接线 `scripts/audit-all.mjs`）；只测不改实现 | 见第三节 ✅ 小节：真实参考工程人机闭环 + 微型工程完整导出/清单/缓存断言 + 词起点帧逐像素保留项证明；BUG-02 已核实随 CLEANUP-01 作废 |
 | SONG-00～06 任意歌曲拆解 | ✅ ZCode 会话（2026-10-02）：SONG-00 契约/适配器已验收（e2b2138）；SONG-01 代码+T1 click track 验收通过（F0.9961/bpm误差0.002/下拍32/32，librosa 兜底），pdoom 基准 F0.8372/bpm误差0.65，T3 环境+权重部署中；SONG-02 校正界面、SONG-03 engine-base+scene-lint、SONG-04 规划器已交付代码（66/66 测试）；SONG-05 ✅ 集成者 2026-10-02 接线完成；SONG-06 第 1 项（click track 全链路）✅，第 2/4 项待做；SONG-03 部分完成（见第三节） | `src/song/`、`analyzer/`、`engine-base/`、`scripts/tests/song/`；SONG-03/05 的 `reference-server.mjs`/`render-worker.mjs`/`project-store.mjs` 接线归集成者 | 环境：videograph-analyzer(py3.9,T0/T1) + videograph-t3(py3.12,T3+beat_this)；模型缓存 F:icg\.models；许可表 analyzer/MODELS.md（NC 模型一律不进默认链路）；双环境详情见 analyzer/environment.md；SONG-06 验收由本会话（QA-01 owner）执行 |
 | AE LLM-AE 冲刺 | 🚧 集成者（本会话）2026-10-02 起；AE-P0 ✅ 已运行验证并合并 main（`bdacc13`），AE-P1 起未开始 | `src/server/rhythm.mjs`、`src/server/mcp-ae-tools.ts`、`scripts/tests/ae/`，以及 render-worker/index/mcp-server 接线 | 见第三节 LLM-AE 冲刺 |
+| STAB-01 稳定化（审计 P0/P1/P2 + 重复建工程 + 局部重渲） | 🚧 2026-10-05 起，分支 `fix/stab-01`，未提交；渲染/MCP/分析器已完成，服务核心与前端部分完成；build ✓、node --test 184/184 ✓，FB-04 待重跑 | 服务核心、渲染、MCP、前端、分析器（跨热点文件，集成者合并） | 已完成/待完成清单见 [docs/STAB-01-HANDOFF.md](docs/STAB-01-HANDOFF.md)；BUG-03/04 服务侧未修 |
 | INTEGRATION 集成与发布检查 | 当前 AI 暂任，交接时明确更换 | 下述共享热点文件 | 审阅接口变更、统一接线、合并分支、跑全量验收，最后更新本计划 |
 | CLEANUP-01 移除旧演示视图（单镜头工坊/教学/创意/旧工作流），只保留真实工作台 | ✅ ZCode 会话（集成者）2026-10-01 完成，已合回 main | 删除 `src/shot/`（full-song.json 迁至 `src/song/data/`）、`src/components/`、`src/llm/`、`src/blackboard/`、`src/memory/`、`src/lyrics/`、`src/render/`、`src/pdoom/tasks.ts`、`src/types.ts`、`src/styles.css`（其中工程工作台复用的 53 条外壳/节点样式迁入 `project.css`）、7 个旧审计脚本；重写 `main.tsx`、`vite.config.ts`、`audit-all.mjs`、`mcp-server.ts`（0.2.0，仅 `project_*` 工具）；移除顶栏死链接 | 已运行验证：`npm run build`（包体 1706KB→451KB）、领域测试 24/24 + brand/协作/文档/反馈套件 45 过、`npm run audit`（project-view-audit 全绿）、`npm run audit:reference`、`transition-integration-audit`（隔离实例四模式全过）；MCP-GUIDE 同步 + sync-platform + skill 1.1.0。附注：audit-all 默认目标为参考复现工程，`VIDEOGRAPH_AUDIT_PROJECT` 可覆盖 |
 
@@ -839,6 +840,6 @@ ASSET-01 的面板和路由先从自己的目录导出；集成者在热点文�
 **详细报告**:
 - 原详细报告（CODE_REVIEW 等）已删除，可在 git 历史 `ffc8f49` 查阅。
 
-**审查人**: Claude (Opus 5.5)  
+**审查人**: Claude (Opus 5.5)
 **下次审查**: 2026-10-14 (两周后)
 
