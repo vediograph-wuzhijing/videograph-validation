@@ -5,13 +5,17 @@ import type { VideoProject } from './api';
 const feedbackTone: Record<string, string> = { pending: 'pending', 'needs-clarification': 'question', responded: 'responded', accepted: 'accepted' };
 const feedbackText: Record<string, string> = { pending: '待 AI 处理', 'needs-clarification': 'AI 提问待回复', responded: '待你确认', accepted: '已采用' };
 
-export function Timeline({ project, selectedId, selectedTransitionId, onSelectShot, onSelectTransition }: {
+export function Timeline({ project, selectedId, selectedTransitionId, playhead, onSelectShot, onSelectTransition, onSeekShot }: {
   project: VideoProject; selectedId: string | null; selectedTransitionId: string | null;
+  /** 预览播放器广播的当前时间（约 4Hz）；没有在播放时为 null。 */
+  playhead: number | null;
   onSelectShot: (id: string) => void; onSelectTransition: (id: string) => void;
+  /** 点击带时间锚点的镜头意见：选中镜头并从锚点时间开始预览。 */
+  onSeekShot: (id: string, t: number) => void;
 }) {
   const duration = project.song?.duration ?? Math.max(1, ...project.shots.map((shot) => shot.end));
   const pct = (t: number) => `${Math.max(0, Math.min(100, (t / duration) * 100))}%`;
-  const sections = (project.song as { sections?: { name: string; start: number; end: number }[] } | null)?.sections ?? [];
+  const sections = project.song?.sections ?? [];
   const ticks = useMemo(() => {
     const step = duration > 120 ? 15 : duration > 40 ? 10 : 5;
     return Array.from({ length: Math.floor(duration / step) + 1 }, (_, i) => i * step);
@@ -19,7 +23,7 @@ export function Timeline({ project, selectedId, selectedTransitionId, onSelectSh
   const markers = [...project.shots.map((shot) => ({ target: shot, kind: 'shot' as const })), ...(project.transitions ?? []).map((transition) => ({ target: transition, kind: 'transition' as const }))]
     .flatMap(({ target, kind }) => (target.feedback ?? []).map((note) => {
       const shot = kind === 'shot' ? project.shots.find((entry) => entry.id === target.id) : project.shots.find((entry) => entry.id === (target as { toShotId: string }).toShotId);
-      return { note, kind, targetId: target.id, t: note.anchor?.t ?? shot?.start ?? 0 };
+      return { note, kind, targetId: target.id, t: note.anchor?.t ?? shot?.start ?? 0, anchored: note.anchor?.t !== undefined };
     }));
   const mm = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
   return <div className="timeline" aria-label="全片时间线">
@@ -40,9 +44,10 @@ export function Timeline({ project, selectedId, selectedTransitionId, onSelectSh
         return <button key={transition.id} type="button" className={`timeline-transition mode-${transition.mode} ${selectedTransitionId === transition.id ? 'is-selected' : ''}`}
           style={{ left: pct(at) }} onClick={() => onSelectTransition(transition.id)} title={`转场 ${transition.mode}${transition.mode === 'cut' ? '' : ` ${transition.duration.toFixed(2)}s`} · ${transition.intent}`} aria-label={`转场 ${transition.fromShotId} 到 ${transition.toShotId}`} />;
       })}
+      {playhead !== null && <span className="timeline-playhead" style={{ left: pct(playhead) }} aria-hidden="true" />}
     </div>
-    <div className="timeline-markers">{markers.map(({ note, kind, targetId, t }) =>
+    <div className="timeline-markers">{markers.map(({ note, kind, targetId, t, anchored }) =>
       <button key={note.id} type="button" className={`timeline-marker tone-${feedbackTone[note.status] ?? 'pending'}`} style={{ left: pct(t) }}
-        onClick={() => (kind === 'shot' ? onSelectShot(targetId) : onSelectTransition(targetId))} title={`${feedbackText[note.status] ?? note.status} · ${note.text.slice(0, 60)}`} aria-label={`意见：${note.text.slice(0, 30)}`} />)}</div>
+        onClick={() => (kind === 'transition' ? onSelectTransition(targetId) : anchored ? onSeekShot(targetId, t) : onSelectShot(targetId))} title={`${feedbackText[note.status] ?? note.status}${anchored ? ` · @${t.toFixed(2)}s` : ''} · ${note.text.slice(0, 60)}`} aria-label={`意见：${note.text.slice(0, 30)}`} />)}</div>
   </div>;
 }

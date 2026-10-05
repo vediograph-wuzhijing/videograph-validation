@@ -43,6 +43,8 @@ export function FeedbackComposer({ shot, busy, hasPreviewTime, getPreviewTime, o
   const [preserveDraft, setPreserveDraft] = useState('');
   const [region, setRegion] = useState<Region | null>(null);
   const [replyDraft, setReplyDraft] = useState<Record<string, string>>({});
+  const [replying, setReplying] = useState('');
+  const [replyError, setReplyError] = useState('');
   const regionThumb = useRef<HTMLDivElement | null>(null);
   const dragStart = useRef<{ x: number; y: number } | null>(null);
   const elements = shot.lyricPlan?.elements ?? [];
@@ -67,11 +69,17 @@ export function FeedbackComposer({ shot, busy, hasPreviewTime, getPreviewTime, o
   };
   const reply = async (note: ProjectFeedback) => {
     const answer = (replyDraft[note.id] ?? '').trim();
-    if (!answer) return;
-    const next = await projectApi<VideoProject>(`/projects/${projectId}/shots/${shot.id}/feedback/${note.id}/reply`, { text: answer });
-    onProject(next);
-    setReplyDraft((current) => ({ ...current, [note.id]: '' }));
+    if (!answer || replying) return;
+    setReplying(note.id); setReplyError('');
+    try {
+      const next = await projectApi<VideoProject>(`/projects/${projectId}/shots/${shot.id}/feedback/${note.id}/reply`, { text: answer });
+      onProject(next);
+      setReplyDraft((current) => ({ ...current, [note.id]: '' }));
+    } catch (error) { setReplyError(error instanceof Error ? error.message : String(error)); }
+    finally { setReplying(''); }
   };
+  // 草稿开始时记下的版本过期（AI 在这期间改了镜头）：让人明确选择基于最新版本提交。
+  const revisionStale = Boolean(text.trim()) && revision !== shot.inputRevision;
   const pointerRegion = (event: React.PointerEvent) => {
     const box = regionThumb.current?.getBoundingClientRect();
     if (!box) return null;
@@ -94,7 +102,8 @@ export function FeedbackComposer({ shot, busy, hasPreviewTime, getPreviewTime, o
         {note.status === 'needs-clarification' && <div className="fb-reply">
           <label className="field"><span>回复 AI 的澄清问题</span>
             <textarea rows={2} value={replyDraft[note.id] ?? ''} onChange={(event) => setReplyDraft((current) => ({ ...current, [note.id]: event.target.value }))} /></label>
-          <button className="mini-button" disabled={busy || !(replyDraft[note.id] ?? '').trim()} onClick={() => void reply(note)}>发送回复，意见回到待处理</button>
+          <button className="mini-button" disabled={busy || Boolean(replying) || !(replyDraft[note.id] ?? '').trim()} onClick={() => void reply(note)}>{replying === note.id ? '发送中…' : '发送回复，意见回到待处理'}</button>
+          {replyError && <p className="shot-error" role="alert">回复没发出去：{replyError}</p>}
         </div>}
       </article>)}
       {notes.length === 0 && <p className="fb-empty">还没有意见。写清“只改哪里、什么必须保留”。</p>}
@@ -159,7 +168,9 @@ export function FeedbackComposer({ shot, busy, hasPreviewTime, getPreviewTime, o
       </div>
     </details>
 
-    <button type="button" className="mini-button fb-submit" disabled={!text.trim() || shot.locked || busy} onClick={() => void submit()}>添加意见，只修改此镜头</button>
+    {revisionStale && <div className="shot-lint">你开始写这条意见后，镜头已更新到 v{shot.inputRevision}（草稿基于 v{revision}）。请先看最新画面。
+      <button type="button" className="mini-button" onClick={() => setRevision(shot.inputRevision)}>基于最新版本提交</button></div>}
+    <button type="button" className="mini-button fb-submit" disabled={!text.trim() || shot.locked || busy || revisionStale} onClick={() => void submit()}>添加意见，只修改此镜头</button>
     <small>保留原始意图 · 新版本需人工接受</small>
   </div>;
 }

@@ -1,6 +1,6 @@
 // ReviewCompare.tsx — FB-02：修改前 / 当前候选并排对比（同一时间点静帧，可切双播放器），
 // 采用/拒绝沿用既有接口与“我已检查当前候选”确认约束；AI 不能接受意见，只有人可以。
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { projectApi, projectFile, type ProjectJob, type ProjectShot, type StillsImage, type VideoProject } from './api';
 
 type Props = {
@@ -25,23 +25,29 @@ export function ReviewCompare({ project, shot, busy, onClose, onProject, onActio
       Math.round((shot.start + span) * 1000) / 1000,
     ];
     return [...new Set(list)].slice(0, 6);
-  }, [shot.id, shot.inputRevision]);
+  }, [shot.id, shot.inputToken]);
   const [selected, setSelected] = useState(times[0] ?? shot.start);
+  // 人看过的那一版：候选在对比期间被 AI 再次改写时，旧的“已检查”与静帧/播放器全部作废。
+  const [seen, setSeen] = useState({ token: shot.inputToken, revision: shot.inputRevision });
   const [mode, setMode] = useState<'stills' | 'players'>('stills');
   const [stills, setStills] = useState<Partial<Record<Version, StillsImage[]>>>({});
   const [stillsState, setStillsState] = useState<Partial<Record<Version, string>>>({});
   const [players, setPlayers] = useState<Partial<Record<Version, string>>>({});
   const [reviewed, setReviewed] = useState(false);
   const [error, setError] = useState('');
-  const stopped = useRef(false);
-  useEffect(() => { stopped.current = false; return () => { stopped.current = true; }; }, []);
+  useEffect(() => {
+    if (seen.token === shot.inputToken) return;
+    setSeen({ token: shot.inputToken, revision: shot.inputRevision });
+    setStills({}); setStillsState({}); setPlayers({}); setReviewed(false);
+  }, [shot.inputToken]);
 
   // 两个版本各起一个 stills 任务并轮询到完成；失败信息进列头，不阻塞另一列。
   useEffect(() => {
     if (!shot.reviewBaseline) return;
+    let cancelled = false;
     const poll = async (jobId: string): Promise<ProjectJob> => {
       for (;;) {
-        if (stopped.current) throw new Error('对比已关闭');
+        if (cancelled) throw new Error('对比已关闭');
         const fresh = await projectApi<ProjectJob>(`/projects/${project.id}/jobs/${jobId}`);
         if (['done', 'error', 'cancelled'].includes(fresh.status)) return fresh;
         await new Promise((resolve) => setTimeout(resolve, 800));
@@ -52,37 +58,46 @@ export function ReviewCompare({ project, shot, busy, onClose, onProject, onActio
       void projectApi<ProjectJob>(`/projects/${project.id}/stills`, { shotId: shot.id, times, version })
         .then(async (job) => ({ fresh: await poll(job.id), version }))
         .then(({ fresh, version }) => {
-          if (stopped.current) return;
+          if (cancelled) return;
           if (fresh.status !== 'done') { setStillsState((current) => ({ ...current, [version]: fresh.error ?? fresh.status })); return; }
           setStills((current) => ({ ...current, [version]: fresh.result?.stills?.images ?? [] }));
           setStillsState((current) => ({ ...current, [version]: '' }));
         })
-        .catch((failure) => { if (!stopped.current) setStillsState((current) => ({ ...current, [version]: String(failure) })); });
+        .catch((failure) => { if (!cancelled) setStillsState((current) => ({ ...current, [version]: String(failure) })); });
     }
-  }, [project.id, shot.id, shot.inputRevision, times]);
+    return () => { cancelled = true; };
+  }, [project.id, shot.id, shot.inputToken, times]);
 
   // 双播放器：两列都从选中时间起播；当前列即“检查当前候选”。
   useEffect(() => {
     if (mode !== 'players') return;
+    let cancelled = false;
     for (const version of ['current', 'before-feedback'] as Version[]) {
       if (players[version]) continue;
       void projectApi<{ url: string; range?: { start: number; end: number } }>(`/projects/${project.id}/preview`, { shotId: shot.id, version })
         .then((data) => {
-          if (stopped.current) return;
+          if (cancelled) return;
           const start = data.range?.start ?? shot.start, end = data.range?.end ?? shot.end;
           const query = new URLSearchParams({ only: shot.id, t: String(selected), rangeStart: String(start), rangeEnd: String(end) });
           setPlayers((current) => ({ ...current, [version]: `${data.url}/?${query}` }));
         })
-        .catch((failure) => { if (!stopped.current) setError(String(failure)); });
+        .catch((failure) => { if (!cancelled) setError(String(failure)); });
     }
-  }, [mode, project.id, shot.id, selected]);
+    return () => { cancelled = true; };
+  }, [mode, project.id, shot.id, shot.inputToken, selected]);
 
   const bothStills = Boolean(stills.current?.length) && Boolean(stills['before-feedback']?.length);
   const bothPlayers = Boolean(players.current) && Boolean(players['before-feedback']);
   const checked = mode === 'players' ? bothPlayers : bothStills;
-  const image = (version: Version) => stills[version]?.find((entry) => entry.t === selected) ?? stills[version]?.[0];
+  // 静帧按请求时间的下标对应；服务端回填的 t 可能有舍入，退而按 1ms 容差匹配，找不到就明确说没有。
+  const image = (version: Version) => {
+    const list = stills[version] ?? [];
+    const index = times.indexOf(selected);
+    const byIndex = list.length === times.length ? list[index] : undefined;
+    return byIndex ?? list.find((entry) => Math.abs(entry.t - selected) < 1e-3);
+  };
   const adopt = () => onAction(async () => {
-    const next = await projectApi<VideoProject>(`/projects/${project.id}/shots/${shot.id}/accept-feedback`, { expectedInputRevision: shot.inputRevision, feedbackIds: responded.map((note) => note.id) });
+    const next = await projectApi<VideoProject>(`/projects/${project.id}/shots/${shot.id}/accept-feedback`, { expectedInputRevision: seen.revision, feedbackIds: responded.map((note) => note.id) });
     onProject(next); onClose();
   });
   const reject = () => onAction(async () => {
@@ -90,11 +105,11 @@ export function ReviewCompare({ project, shot, busy, onClose, onProject, onActio
     onProject(next); onClose();
   });
 
-  return <div className="modal-overlay" role="dialog" aria-label={`对比 ${shot.title} 的修改前与当前候选`}>
+  return <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={`对比 ${shot.title} 的修改前与当前候选`} onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}>
     <div className="fb-compare-modal">
       <header>
         <strong>{shot.title} · 修改前 ↔ 当前候选</strong>
-        <button aria-label="关闭对比" onClick={onClose}>×</button>
+        <button aria-label="关闭对比" autoFocus onClick={onClose}>×</button>
       </header>
       {error && <p className="shot-error" role="alert">{error}</p>}
       <div className="fb-compare-toolbar" role="tablist" aria-label="对比方式">
@@ -104,7 +119,7 @@ export function ReviewCompare({ project, shot, busy, onClose, onProject, onActio
           {times.map((t) => <button key={t} className={t === selected ? 'active' : ''} aria-pressed={t === selected} onClick={() => setSelected(t)}>{t.toFixed(2)}s</button>)}
         </span>}
       </div>
-      <div className="fb-compare-columns">
+      <div className="fb-compare-columns" role="tabpanel" aria-label={mode === 'stills' ? '静帧对比' : '双播放器'}>
         {(['before-feedback', 'current'] as Version[]).map((version) => <section key={version} className="fb-compare-column" data-version={version}>
           <h3>{version === 'current' ? '当前候选' : '修改前'}</h3>
           {mode === 'stills'
@@ -112,9 +127,9 @@ export function ReviewCompare({ project, shot, busy, onClose, onProject, onActio
               ? <p className="fb-compare-note">{stillsState[version]}</p>
               : image(version)
                 ? <img src={projectFile(project.id, image(version)!.file)} alt={`${version === 'current' ? '当前候选' : '修改前'} ${selected.toFixed(2)}s 静帧`} />
-                : <p className="fb-compare-note">无静帧</p>
+                : <p className="fb-compare-note">没有 {selected.toFixed(2)}s 的静帧</p>
             : players[version]
-              ? <iframe title={`${version === 'current' ? '当前候选' : '修改前'}播放器`} src={players[version]} allow="autoplay" />
+              ? <iframe title={`${version === 'current' ? '当前候选' : '修改前'}播放器`} src={players[version]} allow="autoplay" sandbox="allow-scripts allow-same-origin" />
               : <p className="fb-compare-note">播放器启动中…</p>}
         </section>)}
       </div>

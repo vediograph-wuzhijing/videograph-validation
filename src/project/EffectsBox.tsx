@@ -3,20 +3,35 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Sparkles, X, Code2, Wand2 } from 'lucide-react';
 import { EffectPreviewer, DEMO_SOURCES, type FxEffect } from '../fx/runtime.mjs';
-import { projectApi } from './api';
+import { projectApi, type VideoProject } from './api';
 
 type Kind = 'all' | 'post' | 'transition';
 
-/** 卡片缩略图：用一块共享的 WebGL 画布逐个渲染成 dataURL（避免为每张卡片建 WebGL 上下文）。 */
+const loseContext = (previewer: EffectPreviewer) => {
+  const gl = previewer.canvas.getContext('webgl2');
+  gl?.getExtension('WEBGL_lose_context')?.loseContext();
+};
+
+/** 卡片缩略图：整个特效箱只用一块 WebGL 画布逐个渲染成 dataURL；浏览器同时只保留约 16 个上下文，不能每次筛选都新建。 */
 function useThumbnails(effects: FxEffect[]) {
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
+  const thumbsRef = useRef(thumbs); thumbsRef.current = thumbs;
+  const previewerRef = useRef<EffectPreviewer | null | undefined>(undefined);
+  useEffect(() => () => { if (previewerRef.current) loseContext(previewerRef.current); previewerRef.current = undefined; }, []);
+  const ids = effects.map((effect) => effect.id).join('\n');
+  const effectsRef = useRef(effects); effectsRef.current = effects;
   useEffect(() => {
-    if (!effects.length) return;
+    const list = effectsRef.current;
+    if (!list.length) return;
     let cancelled = false;
-    const canvas = document.createElement('canvas'); canvas.width = 288; canvas.height = 162;
-    let previewer: EffectPreviewer;
-    try { previewer = new EffectPreviewer(canvas); } catch { return; }
-    const queue = effects.filter((effect) => !thumbs[effect.id]);
+    if (previewerRef.current === undefined) {
+      const canvas = document.createElement('canvas'); canvas.width = 288; canvas.height = 162;
+      try { previewerRef.current = new EffectPreviewer(canvas); } catch { previewerRef.current = null; }
+    }
+    const previewer = previewerRef.current;
+    if (!previewer) return;
+    const canvas = previewer.canvas;
+    const queue = list.filter((effect) => thumbsRef.current[effect.id] === undefined);
     const source = (effect: FxEffect) => effect.kind === 'transition' ? 'type' : ({ '手绘与绘画': 'scene', '印刷与版画': 'portrait', '胶片与调色': 'scene', '复古与数字': 'shapes', '生成层': 'scene', '镜头与扭曲': 'scene', '画面版式': 'portrait' } as Record<string, string>)[effect.category ?? ''] ?? 'type';
     const step = () => {
       if (cancelled) return;
@@ -30,7 +45,7 @@ function useThumbnails(effects: FxEffect[]) {
     };
     requestAnimationFrame(step);
     return () => { cancelled = true; };
-  }, [effects]);
+  }, [ids]);
   return thumbs;
 }
 
@@ -66,12 +81,12 @@ function EffectDetail({ effect, onClose, shotTitle, onSuggest, busy }: { effect:
       frame = requestAnimationFrame(loop);
     };
     frame = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(frame);
+    return () => { cancelAnimationFrame(frame); loseContext(previewer); };
   }, [effect, source, bpm]);
   const changed = Object.entries(values).filter(([name, value]) => JSON.stringify(value) !== JSON.stringify(effect.params[name]?.default));
   const suggestion = `请为此镜头套用特效箱「${effect.name}」（${effect.id}）${changed.length ? `，参数 ${changed.map(([name, value]) => `${name}=${typeof value === 'number' ? +value.toFixed(4) : value}`).join('，')}` : '（默认参数）'}。套用后用 project_filmstrip 自查节拍与画面，保留歌词时序与配色意图。`;
-  return <div className="fx-detail" role="dialog" aria-label={`${effect.name} 预览`}>
-    <header><div><span className="eyebrow">{effect.kind === 'transition' ? '转场' : '镜头后期'} · {effect.category} · {effect.id}</span><h3>{effect.name}</h3></div><button className="icon-button" aria-label="关闭特效预览" onClick={onClose}><X size={16} /></button></header>
+  return <div className="fx-detail" role="dialog" aria-modal="true" aria-label={`${effect.name} 预览`} onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}>
+    <header><div><span className="eyebrow">{effect.kind === 'transition' ? '转场' : '镜头后期'} · {effect.category} · {effect.id}</span><h3>{effect.name}</h3></div><button className="icon-button" aria-label="关闭特效预览" autoFocus onClick={onClose}><X size={16} /></button></header>
     <div className="fx-detail-body">
       <div className="fx-stage">
         <canvas ref={canvasRef} width={960} height={540} />
@@ -96,13 +111,17 @@ function EffectDetail({ effect, onClose, shotTitle, onSuggest, busy }: { effect:
   </div>;
 }
 
-export function EffectsBox({ projectId, shotId, shotTitle, shotRevision, busy, onSuggested }: { projectId?: string; shotId?: string; shotTitle?: string; shotRevision?: number; busy?: boolean; onSuggested?: () => void }) {
+export function EffectsBox({ projectId, shotId, shotTitle, shotRevision, busy, onProject }: { projectId?: string; shotId?: string; shotTitle?: string; shotRevision?: number; busy?: boolean; onProject?: (project: VideoProject) => void }) {
   const [effects, setEffects] = useState<FxEffect[]>([]);
   const [status, setStatus] = useState('正在读取特效箱…');
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState<Kind>('post');
   const [category, setCategory] = useState('');
   const [open, setOpen] = useState<FxEffect | null>(null);
+  // 打开详情那一刻的目标镜头：之后在别处切了镜头，建议也不会写到另一个镜头上。
+  const [target, setTarget] = useState<{ shotId: string; title?: string; revision: number } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const openEffect = (effect: FxEffect) => { setOpen(effect); setTarget(shotId && shotRevision !== undefined ? { shotId, title: shotTitle, revision: shotRevision } : null); };
   const [notice, setNotice] = useState('');
   useEffect(() => {
     projectApi<{ effects: FxEffect[]; glTransitions: { cached: number; total: number } }>('/fx/effects')
@@ -117,11 +136,13 @@ export function EffectsBox({ projectId, shotId, shotTitle, shotRevision, busy, o
   }, [effects, query, kind, category]);
   const thumbs = useThumbnails(visible);
   const suggest = async (text: string) => {
-    if (!projectId || !shotId || shotRevision === undefined) return;
+    if (!projectId || !target || submitting) return;
+    setSubmitting(true);
     try {
-      await projectApi(`/projects/${projectId}/shots/${shotId}/feedback`, { expectedInputRevision: shotRevision, text, preserve: ['歌词时序', '镜头时长'], anchor: { aspect: 'other' } });
-      setNotice(`已写成「${shotTitle}」的修改意见，等待 AI 套用。`); setOpen(null); onSuggested?.();
+      const next = await projectApi<VideoProject>(`/projects/${projectId}/shots/${target.shotId}/feedback`, { expectedInputRevision: target.revision, text, preserve: ['歌词时序', '镜头时长'], anchor: { aspect: 'other' } });
+      setNotice(`已写成「${target.title ?? target.shotId}」的修改意见，等待 AI 套用。`); setOpen(null); onProject?.(next);
     } catch (error) { setNotice(`没写成：${error instanceof Error ? error.message : String(error)}`); }
+    finally { setSubmitting(false); }
   };
   return <div className="fx-box">
     <div className="fx-toolbar">
@@ -131,12 +152,13 @@ export function EffectsBox({ projectId, shotId, shotTitle, shotRevision, busy, o
     </div>
     <div className="fx-chips"><button className={!category ? 'is-active' : ''} onClick={() => setCategory('')}>全部类别</button>{categories.map((name) => <button key={name} className={category === name ? 'is-active' : ''} onClick={() => setCategory(name)}>{name}</button>)}</div>
     {notice && <p className="fx-notice" role="status">{notice}</p>}
-    <div className="fx-grid">{visible.map((effect) => <button key={effect.id} className="fx-card" onClick={() => setOpen(effect)} aria-label={`预览 ${effect.name}`}>
+    <div className="fx-grid">{visible.map((effect) => <button key={effect.id} className="fx-card" onClick={() => openEffect(effect)} aria-label={`预览 ${effect.name}`}>
       <span className="fx-thumb">{thumbs[effect.id] ? <img src={thumbs[effect.id]} alt="" /> : <Sparkles size={18} />}</span>
       <span className="fx-card-text"><strong>{effect.name}</strong><small>{effect.summary}</small></span>
       <span className="fx-card-tags">{effect.kind === 'transition' ? <em>转场</em> : null}{Object.keys(effect.bindings ?? {}).length ? <em className="is-beat">节拍</em> : null}{(effect.tags ?? []).slice(0, 2).map((tag) => <em key={tag}>{tag}</em>)}</span>
     </button>)}</div>
     {!visible.length && <p className="project-note">没有匹配的动效。</p>}
-    {open && <EffectDetail effect={open} onClose={() => setOpen(null)} shotTitle={shotTitle} busy={busy} onSuggest={shotId ? (text) => void suggest(text) : undefined} />}
+    {notice && open && <p className="fx-notice" role="status">{notice}</p>}
+    {open && <EffectDetail effect={open} onClose={() => setOpen(null)} shotTitle={target?.title ?? target?.shotId} busy={busy || submitting} onSuggest={target ? (text) => void suggest(text) : undefined} />}
   </div>;
 }
