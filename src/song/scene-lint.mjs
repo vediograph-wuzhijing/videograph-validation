@@ -2,10 +2,13 @@
 // 不满足的提交必须拒绝（避免换歌后运行时才崩）。纯函数；接线（submitShotSource 调用）由集成者完成。
 import { SongError } from './contract.mjs';
 
+// 允许转义引号；模板字符串只检查不含 ${} 插值的字面量，变量参数无法静态判断。
 const LY_GET_PATTERNS = [
-  /\bly\.get\(\s*'([^'\n]+)'\s*[),]/g,
-  /\bly\.get\(\s*"([^"\n]+)"\s*[),]/g,
+  /\bly\.get\(\s*'((?:\\.|[^'\\\n])+)'\s*[),]/g,
+  /\bly\.get\(\s*"((?:\\.|[^"\\\n])+)"\s*[),]/g,
+  /\bly\.get\(\s*`((?:\\.|[^`\\$])+)`\s*[),]/g,
 ];
+const unescape = (literal) => literal.replace(/\\(.)/g, '$1');
 
 /** 返回 { ok, violations }：violations 每项 { kind, detail }。 */
 export function lintSceneCode(code, analysis) {
@@ -15,7 +18,7 @@ export function lintSceneCode(code, analysis) {
   const allText = [...lineTexts].join('\n');
   for (const pattern of LY_GET_PATTERNS) {
     for (const match of code.matchAll(pattern)) {
-      const literal = match[1];
+      const literal = unescape(match[1]);
       if (!lineTexts.has(literal) && !allText.includes(literal)) {
         violations.push({ kind: 'lyric-not-in-song', detail: `ly.get("${literal}") 不存在于本工程歌词（换歌会抛错；请改用窗口歌词 linesIn/词级时间）` });
       }

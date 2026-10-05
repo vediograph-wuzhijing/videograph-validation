@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const root = mkdtempSync(join(tmpdir(), 'videograph-song-project-'));
 process.env.VIDEOGRAPH_PROJECTS = join(root, 'projects');
@@ -161,9 +162,9 @@ test('无歌词音频：不产生任何歌词（不套用旧工程）', async ()
   assert.deepEqual(JSON.parse(readFileSync(join(engine, 'data/lyrics.json'), 'utf8')).lines, []);
 });
 
-test('回归：pdoom 原 BGM 仍走指纹导入（22 镜头、无新歌状态、音频缺省 pdoom.mp3）', () => {
-  const bgm = new URL('../../../../pdoom-video/audio/pdoom.mp3', import.meta.url);
-  const project = store.createProjectFromAudio(bgm.pathname.replace(/^\/([A-Za-z]:)/, '$1'), '参考');
+const pdoomBgm = fileURLToPath(new URL('../../../../pdoom-video/audio/pdoom.mp3', import.meta.url));
+test('回归：pdoom 原 BGM 仍走指纹导入（22 镜头、无新歌状态、音频缺省 pdoom.mp3）', { skip: !existsSync(pdoomBgm) && '本机没有 ../pdoom-video 参考仓库' }, () => {
+  const project = store.createProjectFromAudio(pdoomBgm, '参考');
   assert.equal(project.status, undefined);
   assert.equal(project.analysis.source, 'fingerprint-cache');
   assert.equal(project.shots.length, 22);

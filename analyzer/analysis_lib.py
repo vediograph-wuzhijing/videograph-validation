@@ -71,11 +71,16 @@ def _band_attacks(y, sr, lo, hi):
     freqs = librosa.fft_frequencies(sr=sr, n_fft=4096)
     mask = (freqs >= lo) & (freqs < hi)
     flux = np.maximum(0.0, np.diff(S[mask], axis=1)).sum(axis=0)
+    # 静音/该频段无能量：delta=0 时 peak_pick 会把平台当峰，强度再除以 0 得 NaN。
+    if flux.size == 0 or float(flux.max()) <= 1e-9:
+        return []
     peaks = librosa.util.peak_pick(flux, pre_max=8, post_max=8, pre_avg=16, post_avg=16, delta=flux.max() * 0.05, wait=10)
     times = librosa.frames_to_time(peaks, sr=sr, hop_length=int(sr * 0.01))
     peak_values = flux[peaks] if len(peaks) else np.array([])
-    top = peak_values.max() if len(peak_values) else 1.0
-    strengths = (peak_values / top * 0.9 + 0.05) if len(peak_values) else np.array([])
+    top = float(peak_values.max()) if len(peak_values) else 0.0
+    if top <= 1e-9:
+        return []
+    strengths = peak_values / top * 0.9 + 0.05
     return [(float(t), float(s)) for t, s in zip(times, strengths)]
 
 
@@ -138,7 +143,8 @@ def estimate_beats(y, sr=SR, meter=4, audio_path=None, device=None):
             continue
         scored.append((float(candidate), grid_score(np.asarray(grid, dtype=float)), np.asarray(grid, dtype=float)))
     if not scored:
-        return [], [], tempo_value, "librosa.beat_track", 0.3
+        # 无节奏证据（静音/自由节拍/极短）：给常速网格的低置信草稿，由人在校正界面改，而不是让整份分析过不了契约。
+        return fallback_grid(len(y) / sr, tempo_value, meter)
     best_score = max(score for _, score, _ in scored)
     qualified = [entry for entry in scored if entry[1] >= max(0.7 * best_score, 0.4)]
     if qualified:
@@ -154,6 +160,9 @@ def estimate_beats(y, sr=SR, meter=4, audio_path=None, device=None):
         else:
             beats = next((entry[2] for entry in scored if abs(entry[0] - tempo_value) < 1e-6), scored[0][2])
             method, confidence = "librosa.beat_track(no-octave,weak-percussion)", 0.3
+    beats = np.asarray(beats, dtype=float)
+    if len(beats) < 2:
+        return fallback_grid(len(y) / sr, tempo_value, meter)
     strength_at = lambda t: max((s for events in onsets.values() for other, s in events if abs(other - t) < 0.05), default=0.0)
     best_offset, best_score = 0, -1.0
     for offset in range(meter):
@@ -164,6 +173,15 @@ def estimate_beats(y, sr=SR, meter=4, audio_path=None, device=None):
     # BPM 取拍位置的线性拟合斜率：网格局部有抖动，长程速率才是真实 BPM
     fit_bpm = 60.0 / float(np.polyfit(np.arange(len(beats)), np.asarray(beats), 1)[0])
     return beats.tolist(), downbeats, fit_bpm, method, confidence
+
+
+def fallback_grid(duration, tempo=0.0, meter=4):
+    """常速兼底网格：tempo 不可信时取 120 BPM；置信度 0.1，method 如实标注。"""
+    bpm = float(tempo) if 40.0 <= float(tempo or 0.0) <= 240.0 else 120.0
+    period = 60.0 / bpm
+    count = max(1, int(max(duration, 0.0) / period))
+    beats = [round(i * period, 4) for i in range(count)]
+    return beats, beats[::meter], bpm, "fallback-grid(no-rhythm-evidence)", 0.1
 
 
 def _onset_grid_beats(y, sr, onsets):
@@ -228,6 +246,16 @@ def _onset_grid_beats(y, sr, onsets):
     return beats
 
 
+def _local_beat_this_checkpoint():
+    """download_models.py 下到 <models>/local/beat_this 的权重；离线机器有它就不走 torch.hub 下载。"""
+    import os
+    from pathlib import Path
+    root = Path(os.environ.get("VIDEOGRAPH_MODELS_DIR") or Path(__file__).resolve().parents[2] / ".models")
+    folder = root / "local" / "beat_this"
+    found = sorted(folder.glob("final0*.ckpt")) or sorted(folder.glob("*.ckpt")) if folder.is_dir() else []
+    return str(found[0]) if found else None
+
+
 def _beats_via_beat_this(audio_path, device):
     import torch
     if device is None:
@@ -236,7 +264,7 @@ def _beats_via_beat_this(audio_path, device):
         from beat_this.inference import File2Beats  # type: ignore
     except ImportError:
         from beat_this.inference.file2beats import File2Beats  # type: ignore
-    f2b = File2Beats(checkpoint_path="final0", device=device)
+    f2b = File2Beats(checkpoint_path=_local_beat_this_checkpoint() or "final0", device=device)
     beats, downbeats = f2b(audio_path)
     return np.asarray(beats), np.asarray(downbeats), "beat_this(final0,%s)" % device, 0.9
 
@@ -267,13 +295,23 @@ def estimate_sections(y, sr=SR, downbeats=None, fps_hint=1.0):
             nearest = min(downbeats, key=lambda d: abs(d - b))
             snapped.append(float(nearest) if abs(nearest - b) <= 4.0 else b)
         bounds = sorted(set(snapped))
-    sections = []
-    for start, end in zip(bounds, bounds[1:]):
-        if end - start >= 5.0:
-            sections.append({"start": start, "end": end, "label": "unknown", "confidence": 0.4})
-    if not sections:
-        sections = [{"start": 0.0, "end": len(y) / sr, "label": "unknown", "confidence": 0.3}]
-    return sections
+    return merge_short_sections(bounds, len(y) / sr)
+
+
+def merge_short_sections(bounds, duration, min_len=5.0):
+    """短段并入相邻段（不丢弃），保证段落首尾相接覆盖 [0, duration]。"""
+    cuts = sorted({b for b in bounds if 0.0 < b < duration})
+    edges = [0.0] + cuts + [duration]
+    merged = [edges[0]]
+    for edge in edges[1:-1]:
+        if edge - merged[-1] >= min_len:
+            merged.append(edge)
+    if len(merged) > 1 and duration - merged[-1] < min_len:
+        merged.pop()
+    merged.append(duration)
+    if len(merged) == 2:
+        return [{"start": 0.0, "end": duration, "label": "unknown", "confidence": 0.3}]
+    return [{"start": float(s), "end": float(e), "label": "unknown", "confidence": 0.4} for s, e in zip(merged, merged[1:])]
 
 
 def beat_f_measure(predicted, reference, tolerance=0.07):

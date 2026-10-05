@@ -1,19 +1,50 @@
 // analyzer-runner.mjs — SONG-01 的 Node 侧运行器：调用 analyzer/analyze.py，缓存键 = audioHash+stages+版本+参数，原子发布。
 // 服务接线（SONG-05 的 HTTP/MCP）由集成者完成；本模块只提供纯函数接口，测试用 stub 解释器，不依赖真实环境。
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const productRoot = fileURLToPath(new URL('../..', import.meta.url));
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
 export const ANALYZER_VERSION = 'song01-v1';
-export const analyzerPython = () => process.env.VIDEOGRAPH_ANALYZER_PYTHON ?? 'D:/Users/Martis/anaconda3/envs/videograph-analyzer/python.exe';
-/** T3（qwen-asr）需要 py3.12：机器上存在 videograph-t3 环境时优先用它，否则回退主解释器（analyzer/environment.md 双环境说明）。 */
-const T3_PYTHON_DEFAULT = 'D:/Users/Martis/anaconda3/envs/videograph-t3/python.exe';
-export const analyzerT3Python = () => process.env.VIDEOGRAPH_ANALYZER_T3_PYTHON ?? (existsSync(T3_PYTHON_DEFAULT) ? T3_PYTHON_DEFAULT : analyzerPython());
+const condaEnvCache = new Map();
+/** 按 conda 环境名找解释器：CONDA_PREFIX/CONDA_EXE 推出的 envs 目录 → 常见安装位置 → `conda env list`。 */
+function condaEnvPython(name) {
+  if (condaEnvCache.has(name)) return condaEnvCache.get(name);
+  const exe = process.platform === 'win32' ? 'python.exe' : 'bin/python';
+  const bases = [];
+  if (process.env.CONDA_PREFIX) bases.push(/[\\/]envs[\\/][^\\/]+[\\/]?$/.test(process.env.CONDA_PREFIX) ? resolve(process.env.CONDA_PREFIX, '..', '..') : process.env.CONDA_PREFIX);
+  if (process.env.CONDA_EXE) bases.push(resolve(dirname(process.env.CONDA_EXE), '..'));
+  for (const dir of ['anaconda3', 'miniconda3', 'miniforge3']) bases.push(join(homedir(), dir));
+  bases.push('D:/Users/Martis/anaconda3'); // 作者机的安装位置：只是最后一个探测项
+  let found = bases.map((base) => join(base, 'envs', name, exe)).find((path) => existsSync(path)) ?? null;
+  if (!found) {
+    const listed = spawnSync('conda', ['env', 'list', '--json'], { encoding: 'utf8', windowsHide: true, timeout: 15000, shell: process.platform === 'win32' });
+    try { const env = JSON.parse(listed.stdout).envs.find((path) => path.replace(/[\\/]+$/, '').endsWith(name)); if (env && existsSync(join(env, exe))) found = join(env, exe); } catch { /* 未装 conda */ }
+  }
+  condaEnvCache.set(name, found);
+  return found;
+}
+export const analyzerPython = () => process.env.VIDEOGRAPH_ANALYZER_PYTHON ?? condaEnvPython('videograph-analyzer') ?? (process.platform === 'win32' ? 'python' : 'python3');
+/** T3（qwen-asr）需要 py3.12：存在 videograph-t3 环境时优先用它，否则回退主解释器（analyzer/environment.md 双环境说明）。 */
+export const analyzerT3Python = () => process.env.VIDEOGRAPH_ANALYZER_T3_PYTHON ?? condaEnvPython('videograph-t3') ?? analyzerPython();
+// 解释器可以是 PATH 上的命令名；只有写成路径时才能预先检查存在。
+const missingInterpreter = (python) => /[\\/]/.test(python) && !existsSync(python);
+export const analyzerTimeoutMs = () => Number(process.env.VIDEOGRAPH_ANALYZER_TIMEOUT_MS) || 30 * 60 * 1000;
+const running = new Set();
+function killTree(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform === 'win32') spawnSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { windowsHide: true });
+  else child.kill('SIGKILL');
+}
+/** 服务关闭时调用：结束所有仍在运行的分析子进程（含其子进程树）。 */
+export function killAll() {
+  for (const child of running) killTree(child);
+  running.clear();
+}
 /** 模型权重根目录：VIDEOGRAPH_MODELS_DIR，默认与仓库同级的 .models（作者机即 F:/aicg/.models，行为不变）。 */
 export const modelsRoot = () => resolve(process.env.VIDEOGRAPH_MODELS_DIR ?? join(productRoot, '..', '.models'));
 export const analysisCacheRoot = () => resolve(process.env.VIDEOGRAPH_SONG_CACHE ?? join(productRoot, '.cache', 'song-analysis'));
@@ -25,15 +56,15 @@ export function analysisCacheKey(audioHash, stages, params, version = ANALYZER_V
 
 /** 已缓存的分析直接返回（含 file 路径）；否则执行并把产物放进缓存。
  * T3 需要独立解释器时自动拆成两步：T0+T3 跑 T3 环境，T1+assemble 跑主环境。 */
-export async function runAnalysis({ audioPath, stages = ['t0', 't1', 't3'], lyricsText, lrcPath, asr, language, gpu = true, title, cacheRoot = analysisCacheRoot(), python = analyzerPython(), t3Python = analyzerT3Python(), analyzerScript = join(productRoot, 'analyzer', 'analyze.py'), onProgress } = {}) {
+export async function runAnalysis({ audioPath, stages = ['t0', 't1', 't3'], lyricsText, lrcPath, asr, language, gpu = true, title, cacheRoot = analysisCacheRoot(), python = analyzerPython(), t3Python = analyzerT3Python(), analyzerScript = join(productRoot, 'analyzer', 'analyze.py'), onProgress, timeoutMs = analyzerTimeoutMs() } = {}) {
   if (!audioPath || !existsSync(audioPath)) throw new Error('音频不存在');
-  if (!existsSync(python)) throw new Error(`分析器解释器不存在：${python}；见 analyzer/environment.md`);
+  if (missingInterpreter(python)) throw new Error(`分析器解释器不存在：${python}；见 analyzer/environment.md`);
   const needsT3 = stages.includes('t3') && Boolean(lyricsText || lrcPath || asr);
-  if (needsT3 && !existsSync(t3Python)) throw new Error(`T3 解释器不存在：${t3Python}；见 analyzer/environment.md`);
+  if (needsT3 && missingInterpreter(t3Python)) throw new Error(`T3 解释器不存在：${t3Python}；见 analyzer/environment.md`);
   // analyze.py 按固定顺序执行阶段；缓存用去重后的实际阶段（含自动 assemble），而非请求列表。
   const baseStages = ['t0', 't1', 't3', 'assemble'].filter((stage) => stages.includes(stage) && (stage !== 't3' || needsT3));
   if (baseStages.includes('t1') && !baseStages.includes('assemble')) baseStages.push('assemble');
-  const splitT3 = needsT3 && resolve(t3Python) !== resolve(python);
+  const splitT3 = needsT3 && t3Python !== python && resolve(t3Python) !== resolve(python);
   if (splitT3 && !baseStages.includes('t0')) baseStages.unshift('t0');
   if (splitT3 && !baseStages.includes('assemble')) baseStages.push('assemble');
   const audioHash = sha256(readFileSync(audioPath));
@@ -55,7 +86,7 @@ export async function runAnalysis({ audioPath, stages = ['t0', 't1', 't3'], lyri
     const runWith = async (interpreter, selected) => {
       const specPath = join(work, `spec-${selected.join('_')}.json`);
       writeFileSync(specPath, JSON.stringify({ audioPath: resolve(audioPath), outDir: work, stages: selected, lyricsText, lrcPath, asr, language, gpu, title }), 'utf8');
-      const lines = await runPython(interpreter, [analyzerScript, '--spec', specPath], onProgress);
+      const lines = await runPython(interpreter, [analyzerScript, '--spec', specPath], onProgress, timeoutMs);
       output.push(...lines);
       return lines;
     };
@@ -81,7 +112,7 @@ export async function runAnalysis({ audioPath, stages = ['t0', 't1', 't3'], lyri
   }
 }
 
-function runPython(python, args, onProgress) {
+function runPython(python, args, onProgress, timeoutMs) {
   return new Promise((resolvePromise, reject) => {
     // 模型权重以 local_dir 模式落盘（绕开 Windows 符号链接特权）；未显式配置时给默认路径。
     const env = { ...process.env };
@@ -90,11 +121,20 @@ function runPython(python, args, onProgress) {
     env.VIDEOGRAPH_QWEN_ASR_DIR ??= join(models, 'local', 'qwen3-asr-1.7b');
     env.HF_HOME ??= models;
     env.TORCH_HOME ??= models; // beat_this 权重走 torch.hub 缓存（TORCH_HOME/checkpoints）
+    env.VIDEOGRAPH_MODELS_DIR ??= models;
+    // 管道下 Python 默认用本地代码页（cp936/cp1252），中文输出会乱码或 UnicodeEncodeError。
+    env.PYTHONUTF8 = '1';
+    env.PYTHONIOENCODING = 'utf-8';
     const child = spawn(python, args, { windowsHide: true, env });
+    running.add(child);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; killTree(child); }, timeoutMs);
     const lines = [];
     let buffer = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
-      buffer += chunk.toString('utf8');
+      buffer += chunk;
       let index;
       while ((index = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, index).trim();
@@ -108,9 +148,15 @@ function runPython(python, args, onProgress) {
       }
     });
     let stderr = '';
-    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString('utf8')).slice(-8000); });
-    child.on('error', reject);
-    child.on('close', (code) => code === 0 ? resolvePromise(lines) : reject(new Error(`分析器退出 ${code}：${stderr || '无 stderr'}`)));
+    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8000); });
+    const done = () => { clearTimeout(timer); running.delete(child); };
+    child.on('error', (error) => { done(); reject(error); });
+    child.on('close', (code) => {
+      done();
+      if (timedOut) reject(new Error(`分析器超时（${Math.round(timeoutMs / 1000)}s，VIDEOGRAPH_ANALYZER_TIMEOUT_MS 可调），已结束进程：${stderr.slice(-2000) || '无 stderr'}`));
+      else if (code === 0) resolvePromise(lines);
+      else reject(new Error(`分析器退出 ${code}：${stderr || '无 stderr'}`));
+    });
   });
 }
 

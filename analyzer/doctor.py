@@ -1,24 +1,32 @@
 # doctor.py — SONG-01 环境自检：JSON 报告，不修改任何状态。
 import json
+import os
 import platform
 import shutil
 import sys
 from importlib.metadata import version as pkg_version, PackageNotFoundError
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from download_models import models_root  # noqa: E402
+
 PACKAGES = ["librosa", "soundfile", "demucs", "beat_this", "faster_whisper", "qwen_asr", "transformers", "accelerate", "torch", "numpy", "scipy"]
 MODELS = {
     "beat_this": ["beat_this"],
-    "qwen3-forced-aligner-0.6b": ["Qwen3-ForcedAligner-0.6B", "Qwen--Qwen3-ForcedAligner-0.6B", "models--Qwen--Qwen3-ForcedAligner-0.6B"],
-    "qwen3-asr-1.7b": ["Qwen3-ASR-1.7B", "Qwen--Qwen3-ASR-1.7B", "models--Qwen--Qwen3-ASR-1.7B"],
+    "qwen3-forced-aligner-0.6b": ["qwen3-forced-aligner-0.6b", "models--qwen--qwen3-forcedaligner-0.6b", "qwen3-forcedaligner-0.6b"],
+    "qwen3-asr-1.7b": ["qwen3-asr-1.7b", "models--qwen--qwen3-asr-1.7b"],
 }
 
 
-def model_cached(names, cache_root):
-    if not cache_root:
-        return False
-    root = Path(cache_root)
-    return any(root.rglob(f"*{name}*") for name in names for _ in [0]) and any(True for _ in root.rglob(f"*{names[0]}*"))
+def model_present(names, roots):
+    """大小写不敏感地找模型目录（macOS/Linux 文件系统区分大小写）。"""
+    for root in roots:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_dir() and any(name in path.name.lower() for name in names):
+                return True
+    return False
 
 
 def main():
@@ -48,24 +56,20 @@ def main():
                 "capability": ".".join(map(str, torch.cuda.get_device_capability(0))),
                 "vramFreeGB": round(free / 2**30, 2),
                 "vramTotalGB": round(total / 2**30, 2),
-                "sm120": torch.cuda.get_device_capability(0) >= (1, 20),
+                "sm120": torch.cuda.get_device_capability(0) >= (12, 0),
             })
     except Exception as error:
         report["cuda"]["error"] = str(error)
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = os.environ.get("FFMPEG_PATH") or shutil.which("ffmpeg")
     report["ffmpeg"] = ffmpeg
-    import os
-    cache_root = os.environ.get("HF_HOME") or os.environ.get("TORCH_HOME")
+    root = models_root()
+    cache_root = str(root)
     report["cacheRoot"] = cache_root
-    if cache_root and Path(cache_root).exists():
-        for model, names in MODELS.items():
-            hits = any(any(Path(cache_root).rglob(f"*{name}*")) for name in names)
-            report["models"][model] = hits
-    else:
-        for model in MODELS:
-            report["models"][model] = False
+    roots = [root] + [Path(p) for p in {os.environ.get("HF_HOME"), os.environ.get("TORCH_HOME")} if p]
+    for model, names in MODELS.items():
+        report["models"][model] = model_present(names, roots)
     # Windows 按盘符；其他平台检查模型缓存所在磁盘（未配置时为仓库同级目录）
-    targets = ("C:\\", "D:\\", "F:\\") if os.name == "nt" else (cache_root or str(Path(__file__).resolve().parents[2]),)
+    targets = ("C:\\", "D:\\", "F:\\") if os.name == "nt" else (cache_root if Path(cache_root).exists() else str(Path(__file__).resolve().parents[2]),)
     for drive in targets:
         try:
             usage = shutil.disk_usage(drive)

@@ -41,14 +41,24 @@ function safeBeatCut(analysis, beat, fps, label) {
   throw new SongError(`切点无法避开词中间${label ? `（${label}）` : ''}`);
 }
 
-/** 单个切点：锚定行（按文本匹配）→ 行首词之前最近拍，帧吸附后仍避开词；器乐锚定段落起点。 */
+/** 单个切点：锚定行（lineIndex，或 lineText[+occurrence]）→ 行首词之前最近拍，帧吸附后仍避开词；器乐锚定段落起点。 */
 export function cutFromAnchor(analysis, anchor, { fps = 30 } = {}) {
   const duration = analysis.audio.duration;
-  if (anchor.lineText !== undefined) {
+  if (anchor.lineIndex !== undefined || anchor.lineText !== undefined) {
     const lines = analysis.lyrics?.lines ?? [];
-    const line = lines.find((entry) => entry.text === anchor.lineText)
-      ?? lines.find((entry) => entry.text.includes(anchor.lineText));
-    if (!line) throw new SongError(`锚定歌词行不存在：「${String(anchor.lineText).slice(0, 60)}」`);
+    let line;
+    if (anchor.lineIndex !== undefined) {
+      line = Number.isInteger(anchor.lineIndex) ? lines[anchor.lineIndex] : undefined;
+      if (!line) throw new SongError(`锚定歌词行不存在：#${anchor.lineIndex}`);
+    } else {
+      const exact = lines.filter((entry) => entry.text === anchor.lineText);
+      const matches = exact.length ? exact : lines.filter((entry) => entry.text.includes(anchor.lineText));
+      if (!matches.length) throw new SongError(`锚定歌词行不存在：「${String(anchor.lineText).slice(0, 60)}」`);
+      // 重复的副歌不能默默选第一遍：那会把后面的切点拉回前面。
+      if (anchor.occurrence === undefined && matches.length > 1) throw new SongError(`歌词行「${String(anchor.lineText).slice(0, 40)}」出现 ${matches.length} 次，请用 occurrence（1 起）或 lineIndex 指定`);
+      line = matches[(anchor.occurrence ?? 1) - 1];
+      if (!line) throw new SongError(`歌词行「${String(anchor.lineText).slice(0, 40)}」没有第 ${anchor.occurrence} 次出现（共 ${matches.length} 次）`);
+    }
     return safeBeatCut(analysis, previousBeat(analysis, line.words[0].start), fps, `行「${line.text.slice(0, 40)}」`);
   }
   if (anchor.sectionIndex !== undefined) {
@@ -62,18 +72,18 @@ export function cutFromAnchor(analysis, anchor, { fps = 30 } = {}) {
     if (midWord(analysis, cut)) throw new SongError(`切点 ${cut}s 落在一个词的中间`);
     return cut;
   }
-  throw new SongError('切点需要 lineText/sectionIndex/t 之一');
+  throw new SongError('切点需要 lineIndex/lineText/sectionIndex/t 之一');
 }
 
 /** 候选切点全集（给 agent 的选择菜单）：歌词行切点 + 段落边界 + 小节线，升序去重。 */
 export function candidateCutPoints(analysis, { fps = 30, shotRange = DEFAULT_SHOT_RANGE } = {}) {
   const candidates = new Set();
-  for (const line of analysis.lyrics?.lines ?? []) {
+  (analysis.lyrics?.lines ?? []).forEach((line, index) => {
     try {
-      const cut = cutFromAnchor(analysis, { lineText: line.text }, { fps });
+      const cut = cutFromAnchor(analysis, { lineIndex: index }, { fps });
       candidates.add(cut);
     } catch { /* 行首词前无可用拍时跳过，不阻塞候选集 */ }
-  }
+  });
   analysis.sections.forEach((section, index) => {
     if (section.start > 0) {
       try { candidates.add(cutFromAnchor(analysis, { sectionIndex: index }, { fps })); } catch { /* ignore */ }
@@ -87,7 +97,7 @@ export function candidateCutPoints(analysis, { fps = 30, shotRange = DEFAULT_SHO
 
 /**
  * 校验 agent 提交的规划并归一化成镜头窗口。
- * plan: [{ anchorLine | anchorSection | t, title?, prompt? }]；时间一律由锚点从分析数据推导。
+ * plan: [{ lineIndex | lineText(+occurrence) | sectionIndex | t, id?, title?, prompt? }]；时间一律由锚点从分析数据推导。
  * 返回 { shots, warnings }；shots: [{ id, title, start, end, anchor, status: 'needs-generation', source: 'ai-original' }]。
  */
 export function validatePlan(plan, analysis, { fps = 30, shotRange = DEFAULT_SHOT_RANGE } = {}) {
@@ -99,6 +109,7 @@ export function validatePlan(plan, analysis, { fps = 30, shotRange = DEFAULT_SHO
   plan.forEach((entry, index) => {
     if (!entry || typeof entry !== 'object') throw new SongError(`plan[${index}] 必须是对象`);
     const cut = cutFromAnchor(analysis, entry, { fps });
+    if (index > 0 && cut > duration - 1 / fps + EPS) throw new SongError(`plan[${index}] 切点 ${cut}s 距曲尾不足一帧（时长 ${duration}s），会产生空镜头`);
     if (index === 0 && cut !== 0) {
       warnings.push(`plan[0] 锚点切点为 ${cut}s，已强制为 0（覆盖全曲）`);
       cuts.push(0);
@@ -114,10 +125,12 @@ export function validatePlan(plan, analysis, { fps = 30, shotRange = DEFAULT_SHO
   for (let i = 0; i < cuts.length - 1; i++) {
     const start = cuts[i], end = cuts[i + 1];
     const length = end - start;
+    if (length <= EPS) throw new SongError(`镜头 ${i + 1} 时长为 ${length.toFixed(3)}s`);
     if (length < shotRange.min - EPS) warnings.push(`镜头 ${i + 1} 时长 ${length.toFixed(2)}s 低于建议下限 ${shotRange.min}s`);
     if (length > shotRange.max + EPS) warnings.push(`镜头 ${i + 1} 时长 ${length.toFixed(2)}s 超过建议上限 ${shotRange.max}s（请确认或拆分）`);
     const entry = plan[i];
-    const anchor = entry.lineText !== undefined ? `歌词行「${String(entry.lineText).slice(0, 30)}」`
+    const anchor = entry.lineIndex !== undefined ? `歌词行 #${entry.lineIndex}`
+      : entry.lineText !== undefined ? `歌词行「${String(entry.lineText).slice(0, 30)}」${entry.occurrence ? `第 ${entry.occurrence} 次` : ''}`
       : entry.sectionIndex !== undefined ? `段落 #${entry.sectionIndex}` : `t=${start.toFixed(2)}s`;
     shots.push({
       id: entry.id && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,40}$/.test(entry.id) ? entry.id : `shot${String(i + 1).padStart(2, '0')}`,

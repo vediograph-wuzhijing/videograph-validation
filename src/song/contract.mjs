@@ -47,8 +47,9 @@ const increasing = (values, label, { strict = true } = {}) => {
   }
   return values;
 };
+// 空通道合法：无鼓/清唱/纯鼓 loop 的某类起音本来就检测不到。
 const onsetTrack = (value, label, duration) => {
-  if (!Array.isArray(value) || !value.length) fail(`${label} 必须是非空 [time, strength] 数组`);
+  if (!Array.isArray(value)) fail(`${label} 必须是 [time, strength] 数组`);
   return value.map((entry, index) => {
     if (!Array.isArray(entry) || entry.length !== 2) fail(`${label}[${index}] 必须是 [time, strength]`);
     const t = num(entry[0], `${label}[${index}].t`, { min: 0, max: duration + 1 });
@@ -145,7 +146,7 @@ export function validateAnalysis(raw) {
     ...(bpm !== undefined ? { bpm } : {}),
     ...(tempoMap ? { tempoMap } : {}),
     beatPeriod: rhythmLayer.beatPeriod !== undefined ? num(rhythmLayer.beatPeriod, 'rhythm.beatPeriod', { min: 0.05, max: 3 }) : undefined,
-    beats: increasing(rhythmLayer.beats, 'rhythm.beats'),
+    beats: increasing(rhythmLayer.beats, 'rhythm.beats').map((t, i) => t > duration + 1 ? fail(`rhythm.beats[${i}] 越过音频时长`) : t),
     downbeats: increasing(rhythmLayer.downbeats, 'rhythm.downbeats'),
     meter: int(rhythmLayer.meter ?? 4, 'rhythm.meter', { min: 1 }),
     confidence: conf(rhythmLayer.confidence, 'rhythm') ?? 1,
@@ -171,6 +172,7 @@ export function validateAnalysis(raw) {
   const frameRate = num(raw.envelopes.frameRate, 'envelopes.frameRate', { min: 1 });
   const envKeys = ENVELOPE_KEYS.filter((key) => raw.envelopes[key] !== undefined);
   if (!envKeys.includes('rms')) fail('envelopes.rms 必填');
+  for (const key of envKeys) if (!Array.isArray(raw.envelopes[key])) fail(`envelopes.${key} 必须是数组`);
   const lengths = envKeys.map((key) => raw.envelopes[key].length);
   if (new Set(lengths).size !== 1) fail('envelopes 各通道长度必须一致');
   const frames = lengths[0];

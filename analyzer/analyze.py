@@ -20,7 +20,11 @@ ANALYZER_VERSION = "song01-v1"
 
 
 def emit(message):
-    print(json.dumps(message, ensure_ascii=False), flush=True)
+    print(json.dumps(message, ensure_ascii=False, allow_nan=False), flush=True)
+
+
+def ffmpeg_bin():
+    return os.environ.get("FFMPEG_PATH") or "ffmpeg"
 
 
 def sha256_file(path):
@@ -37,7 +41,7 @@ def read_partial(out_dir, name):
 
 
 def write_partial(out_dir, name, data):
-    (out_dir / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    (out_dir / name).write_text(json.dumps(data, ensure_ascii=False, allow_nan=False), encoding="utf-8")
 
 
 def stage_t0(spec, out_dir):
@@ -48,7 +52,7 @@ def stage_t0(spec, out_dir):
         return existing
     emit({"stage": "t0", "status": "running"})
     wav = out_dir / "t0-decoded.wav"
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", spec["audioPath"], "-ar", str(lib.SR), wav],
+    subprocess.run([ffmpeg_bin(), "-y", "-v", "error", "-i", spec["audioPath"], "-ar", str(lib.SR), wav],
                    check=True, capture_output=True)
     import soundfile as sf
     info = sf.info(wav)
@@ -117,13 +121,12 @@ def stage_t3(spec, out_dir):
             aligned = align_lines_segmented(segments, [line["text"] for line in text_lines], language, spec)
         else:
             aligned = align_lines_sliding(t0["wav"], t0["duration"], [line["text"] for line in text_lines], language, spec)
-        lines = []
-        for index, line in enumerate(text_lines):
-            line_words = aligned[index] if index < len(aligned) else []
-            start = line_words[0]["start"] if line_words else 0.0
-            end = line_words[-1]["end"] if line_words else start + 2.0
-            lines.append({"text": line["text"], "start": start, "end": end, "words": line_words})
+        lines = fill_unaligned_lines([line["text"] for line in text_lines], aligned, t0["duration"])
+        fallback = [index for index, line in enumerate(lines) if line.get("fallback")]
         result = {"lyrics": {"language": language, "textSource": text_source, "humanConfirmed": True, "lines": lines}, "mode": "align-segmented"}
+        if fallback:
+            result["fallbackLines"] = fallback
+            result["warnings"] = [f"{len(fallback)} 行未能对齐，已按相邻行内插、词按字数摊开（conf 0.3），请在校正界面核对：第 {', '.join(str(i + 1) for i in fallback)} 行"]
     else:
         result = {"lyrics": transcribe_segmented(segments, language, spec), "mode": "asr-draft", "draft": True,
                   "warnings": ["ASR 歌词是草稿：必须经人确认后才能用于规划"]}
@@ -242,6 +245,52 @@ def _token_count(text):
 LINE_WINDOW = 12.0
 
 
+def _line_tokens(text):
+    """兜底摊开用的词切分：中文按字、西文按空格（与 _token_count 同口径）。"""
+    stripped = text.replace(" ", "")
+    cjk = sum(1 for ch in stripped if "一" <= ch <= "鿿")
+    if stripped and cjk * 2 >= len(stripped):
+        return [ch for ch in stripped if ch not in CJK_PUNCT] or [stripped]
+    return text.split() or [text.strip() or "…"]
+
+
+def fill_unaligned_lines(texts, aligned, duration):
+    """对齐失败的行：行界按前后已对齐行内插（连续失败行按字数分配间隙），词按字数比例摊开，
+    conf 0.3 并标 fallback，交给人工校正。最后做单调钳制，保证通过契约（非空词、行首递增）。"""
+    lines = [{"text": text, "words": list(aligned[i]) if i < len(aligned) and aligned[i] else []} for i, text in enumerate(texts)]
+    index = 0
+    while index < len(lines):
+        if lines[index]["words"]:
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(lines) and not lines[run_end]["words"]:
+            run_end += 1
+        gap_start = lines[index - 1]["words"][-1]["end"] if index > 0 else 0.0
+        gap_end = lines[run_end]["words"][0]["start"] if run_end < len(lines) else duration
+        if gap_end - gap_start < 0.1 * (run_end - index):
+            gap_end = min(duration, gap_start + 0.1 * (run_end - index))
+        weights = [max(1, len(lines[i]["text"].replace(" ", ""))) for i in range(index, run_end)]
+        cursor = gap_start
+        for offset, line_index in enumerate(range(index, run_end)):
+            span = (gap_end - gap_start) * weights[offset] / sum(weights)
+            tokens = _line_tokens(lines[line_index]["text"])
+            sizes = [max(1, len(token)) for token in tokens]
+            words, at = [], cursor
+            for token, size in zip(tokens, sizes):
+                step = span * size / sum(sizes)
+                words.append({"w": token, "start": round(at, 3), "end": round(min(duration, at + step), 3), "conf": 0.3})
+                at += step
+            lines[line_index] = {"text": lines[line_index]["text"], "words": words, "fallback": True}
+            cursor += span
+        index = run_end
+    fixed = _monotonic_lines(lines)
+    for line in fixed:
+        line["end"] = min(line["end"], duration)
+        line["start"] = min(line["start"], line["end"])
+    return fixed
+
+
 def align_lines_sliding(wav, duration, texts, language, spec):
     """逐行锚点验证对齐： ForcedAligner 特征窗 30s，实测 ≥27s 大段在部分语言（日语实测）
     上塌缩（全零时间戳），且文本不在窗口内时会把词锚到窗口端点（假对齐、conf 不可用）。
@@ -332,11 +381,11 @@ def align_lines_segmented(segments, texts, language, spec):
     aligner = _load_qwen_aligner(spec)
     lang_name = LANGUAGE_NAMES.get(language, language)
     total = sum(seg["end"] - seg["start"] for seg in segments)
-    quota = []
-    for seg in segments:
-        quota.append(max(1, round(len(texts) * (seg["end"] - seg["start"]) / total)))
-    fix = len(texts) - sum(quota)
-    quota[-1] += fix
+    # 最大余数分配：段数多于行数时允许某段 0 行，配额不会出现负数。
+    exact = [len(texts) * (seg["end"] - seg["start"]) / total for seg in segments]
+    quota = [int(value) for value in exact]
+    for i in sorted(range(len(exact)), key=lambda i: exact[i] - quota[i], reverse=True)[:len(texts) - sum(quota)]:
+        quota[i] += 1
     results = [[]] * len(texts)
     cursor = 0
     for seg, count in zip(segments, quota):
@@ -453,12 +502,12 @@ def assemble(spec, out_dir):
         analysis["lyrics"] = t3["lyrics"]
         analysis["provenance"]["lyrics"] = {
             "tool": "videograph-analyzer", "version": ANALYZER_VERSION, "startedAt": started, "confidence": 0.6,
-            "model": "Qwen3-ForcedAligner-0.6B" if t3.get("mode") == "align" else "Qwen3-ASR-1.7B",
-            "params": {"mode": t3.get("mode"), "draft": bool(t3.get("draft"))},
+            "model": "Qwen3-ForcedAligner-0.6B" if str(t3.get("mode", "")).startswith("align") else "Qwen3-ASR-1.7B",
+            "params": {"mode": t3.get("mode"), "draft": bool(t3.get("draft")), "fallbackLines": len(t3.get("fallbackLines", []))},
         }
     output = out_dir / "analysis-v2.json"
     temporary = out_dir / f".analysis-v2.{os.getpid()}.tmp"
-    temporary.write_text(json.dumps(analysis, ensure_ascii=False), encoding="utf-8")
+    temporary.write_text(json.dumps(analysis, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     os.replace(temporary, output)
     emit({"stage": "all", "status": "done", "file": str(output)})
     return analysis

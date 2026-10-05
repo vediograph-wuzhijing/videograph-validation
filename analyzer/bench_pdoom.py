@@ -2,6 +2,7 @@
 # 记录 beat F-measure；有对齐模型时再测词首时间中位/P90 误差。结果如实写入 ROADMAP（目标中位 ≤50ms）。
 import argparse
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -45,7 +46,7 @@ def main():
             with tempfile.TemporaryDirectory() as tmp:
                 wav = str(Path(tmp) / "audio.wav")
                 import subprocess
-                subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(audio), "-ar", str(lib.SR), wav], check=True, capture_output=True)
+                subprocess.run([os.environ.get("FFMPEG_PATH") or "ffmpeg", "-y", "-v", "error", "-i", str(audio), "-ar", str(lib.SR), wav], check=True, capture_output=True)
                 import time
                 started = time.time()
                 aligned = align_with_qwen(wav, [line.strip() for line in args.lyrics_text.splitlines() if line.strip()], args.language, {"gpu": args.gpu})

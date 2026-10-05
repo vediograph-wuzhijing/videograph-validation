@@ -1,19 +1,19 @@
 # analyzer/environment.md — 本地分析器运行环境（SONG-01）
 
-> 建环境与下载模型前必须征得用户同意（ROADMAP SONG-01）。本机基线：Windows、RTX 5070 Laptop 8GB（sm_120）、
-> conda 25.5.1 位于 `D:\Users\Martis\anaconda3`、ffmpeg 9 在 PATH、模型缓存统一 `F:\aicg\.models`
-> （`HF_HOME`/`TORCH_HOME` 指向此处，不进仓库）。
+> 建环境与下载模型前必须征得用户同意（ROADMAP SONG-01）。作者机基线：Windows、RTX 5070 Laptop 8GB（sm_120）、
+> conda 25.5.1、ffmpeg 9 在 PATH（或 `FFMPEG_PATH`）、模型缓存统一 `<repo>/../.models`（`VIDEOGRAPH_MODELS_DIR` 可改，不进仓库）。
 
 ## 方案 A（默认，2026-10-02 用户已批准）：克隆现有 pytorch 环境
 
 ```sh
 conda create -n videograph-analyzer --clone pytorch -y     # 复用 torch 2.8.0+cu128，免下 3GB
-"D:/Users/Martis/anaconda3/envs/videograph-analyzer/python.exe" -m pip install -r analyzer/requirements-analyzer.txt
+conda run -n videograph-analyzer python -m pip install -r analyzer/requirements-analyzer.txt
 ```
 
-- 克隆约占 D 盘 9GB（D 剩 29GB）。Python 3.9：依赖版本全部选仍支持 3.9 的（见 requirements）。
+- 克隆约占 9GB。Python 3.9：依赖版本全部选仍支持 3.9 的（见 requirements）。
 - qwen-asr 固定 `transformers==4.57.6`（与源环境一致）；`accelerate==1.12.0` 在克隆环境内升级。
-- runner 通过环境变量 `VIDEOGRAPH_ANALYZER_PYTHON` 指定解释器绝对路径，不从 PATH 猜。
+- runner 找解释器的顺序：`VIDEOGRAPH_ANALYZER_PYTHON` → conda 环境 `videograph-analyzer`（由 `CONDA_PREFIX`/`CONDA_EXE`、常见安装位置或 `conda env list` 推出）→ PATH 上的 `python`。T3 同理（`VIDEOGRAPH_ANALYZER_T3_PYTHON` → `videograph-t3` → 主解释器）。
+- 单次分析超时 `VIDEOGRAPH_ANALYZER_TIMEOUT_MS`（默认 30 分钟），超时结束整个进程树。
 
 ## 方案 B（A 出现依赖冲突时）：新建 Python 3.12 环境
 
@@ -47,19 +47,12 @@ Demucs 分轨（T2）只能由用户显式开启并记录在导出清单。
 
 权重不使用 hub 缓存快照（WinError 1314），统一实体拷贝：
 
-- `F:/aicg/.models/local/qwen3-forced-aligner-0.6b`（环境变量 `VIDEOGRAPH_QWEN_ALIGNER_DIR`）
-- `F:/aicg/.models/local/qwen3-asr-1.7b`（环境变量 `VIDEOGRAPH_QWEN_ASR_DIR`）
+- `<models>/local/qwen3-forced-aligner-0.6b`（环境变量 `VIDEOGRAPH_QWEN_ALIGNER_DIR`）
+- `<models>/local/qwen3-asr-1.7b`（环境变量 `VIDEOGRAPH_QWEN_ASR_DIR`）
+- `<models>/local/beat_this`（有 `.ckpt` 时直接加载，不走 torch.hub 下载）
 
-`src/song/analyzer-runner.mjs` 启动子进程时会注入这两个默认值；`HF_HOME` 默认 `F:/aicg/.models`。
-下载/续传：`python analyzer/download_models.py`（同样 local_dir 模式；断线可直接重跑续传）。
-{"download": "qwen3-asr-1.7b", "repo": "Qwen/Qwen3-ASR-1.7B", "target": "F:\aicg\.models\local\qwen3-asr-1.7b"}
-{"downloaded": "qwen3-asr-1.7b", "path": "F:\aicg\.models\local\qwen3-asr-1.7b"}
-{"done": true}（同样 local_dir 模式，可断点重试）。
-
-## 实测 API（qwen-asr 0.0.6，2026-10-02）
-
-- 对齐： →  → （秒）；语言用全名（zh→Chinese）。
-- ASR： →  → 。
+`<models>` = `VIDEOGRAPH_MODELS_DIR`，默认仓库同级的 `.models`。`src/song/analyzer-runner.mjs` 启动子进程时注入这些默认值，`HF_HOME`/`TORCH_HOME` 默认也指向 `<models>`。
+下载/续传：`python analyzer/download_models.py`（local_dir 模式；断线可直接重跑续传；任一模型失败退出码为 1）。
 
 ## 实测 API（qwen-asr 0.0.6，2026-10-02 于 T3 环境）
 
@@ -69,6 +62,6 @@ Demucs 分轨（T2）只能由用户显式开启并记录在导出清单。
 ## 自检
 
 ```sh
-"…/videograph-analyzer/python.exe" analyzer/doctor.py          # JSON 报告
-"…/videograph-analyzer/python.exe" analyzer/clicktrack_test.py # T1 验收：F≥0.98，bpm 误差 ≤0.5
+<analyzer-python> analyzer/doctor.py          # JSON 报告
+<analyzer-python> analyzer/clicktrack_test.py # T1 验收：F≥0.98，bpm 误差 ≤0.5
 ```

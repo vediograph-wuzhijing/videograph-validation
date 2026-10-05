@@ -13,6 +13,10 @@ MODELS = [
 ]
 
 
+def models_root():
+    return Path(os.environ.get("VIDEOGRAPH_MODELS_DIR") or Path(__file__).resolve().parents[2] / ".models")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", default=None, help="逗号分隔的模型名；缺省全部")
@@ -20,11 +24,12 @@ def main():
     args = parser.parse_args()
     wanted = args.only.split(",") if args.only else [m["name"] for m in MODELS]
     plan = [m for m in MODELS if m["name"] in wanted]
-    root = Path(os.environ.get("VIDEOGRAPH_MODELS_DIR") or Path(__file__).resolve().parents[2] / ".models")
+    root = models_root()
     print(json.dumps({"plan": [m["name"] for m in plan], "cacheRoot": str(root), "dryRun": args.dry_run}, ensure_ascii=False))
     if args.dry_run:
         return
     from huggingface_hub import snapshot_download
+    failed = []
     for model in plan:
         repos = [model["repo"]] + model.get("alternates", [])
         target = root / "local" / model["name"]
@@ -40,8 +45,10 @@ def main():
                 last_error = error
         else:
             print(json.dumps({"error": model["name"], "detail": str(last_error)[:300]}, ensure_ascii=False), flush=True)
-            sys.exitCode = 1
-    print(json.dumps({"done": True}, ensure_ascii=False))
+            failed.append(model["name"])
+    print(json.dumps({"done": not failed, "failed": failed}, ensure_ascii=False))
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
