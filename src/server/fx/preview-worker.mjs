@@ -5,13 +5,14 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { browserPath, angleArgs } from '../browser.mjs';
+import { withTimeout } from '../render-cache.mjs';
 
 const runtimePath = fileURLToPath(new URL('../../fx/runtime.mjs', import.meta.url));
 const PAGE = `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#000"><script type="module">
 import * as fx from '/runtime.mjs'; window.__fx = fx; window.__fxReady = true;
 </script></body>`;
 
-export async function withFxBrowser(work) {
+export async function withFxBrowser(work, { timeoutMs = 180000 } = {}) {
   const server = createServer((req, res) => {
     if (req.url === '/runtime.mjs') { res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' }); res.end(readFileSync(runtimePath)); return; }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(PAGE);
@@ -23,7 +24,8 @@ export async function withFxBrowser(work) {
     const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     await page.waitForFunction(() => window.__fxReady === true, null, { timeout: 30000 });
-    return await work(page);
+    // GLSL 把 GPU 卡死时 evaluate 可能不返回：整体超时后关浏览器，MCP 调用不会永久挂住。
+    return await withTimeout(work(page), timeoutMs, () => { void browser.close(); return new Error(`特效预览 ${Math.round(timeoutMs / 1000)} 秒内未完成（着色器可能卡住 GPU）`); });
   } finally {
     await browser?.close();
     await new Promise((resolve) => server.close(resolve));

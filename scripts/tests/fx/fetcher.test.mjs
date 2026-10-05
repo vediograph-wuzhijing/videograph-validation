@@ -124,3 +124,17 @@ test('BSD 写法变体规范化；拒绝记录在规则放宽后会重新判定'
   const second = await fx.ensurePrefix(relaxed, 'glt4', '', { fetchImpl: fakeFetch() });
   assert.ok(second.fetched.includes('transitions/nc.glsl'), '规则变化后应重新下载判定');
 });
+
+test('单个文件下载失败不影响其他文件入账；重定向到未登记主机被拒绝', async () => {
+  const reg = { ...registry, sources: [{ ...registry.sources[0], id: 'glt5' }] };
+  const source = reg.sources[0];
+  const entries = fx.selectFiles(source, tree);
+  const failing = async (url) => url.endsWith('/fade.glsl') ? new Response('boom', { status: 500 }) : fakeFetch()(url);
+  const result = await fx.ensureFiles(reg, source, entries, { fetchImpl: failing });
+  assert.ok(result.failed.some((entry) => entry.path === 'transitions/fade.glsl'));
+  assert.ok(result.fetched.length > 0);
+  for (const path of result.fetched) assert.ok(fx.readCached(source, path).content.length > 0, `${path} 应已入账`);
+  const redirected = async (url) => { const response = await fakeFetch()(url); Object.defineProperty(response, 'url', { value: 'https://evil.example/x' }); return response; };
+  const other = { ...registry, sources: [{ ...registry.sources[0], id: 'glt6' }] };
+  await assert.rejects(fx.sourceTree(other, other.sources[0], { fetchImpl: redirected }), /重定向到不允许的地址/);
+});

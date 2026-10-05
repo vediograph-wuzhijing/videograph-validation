@@ -4,11 +4,12 @@ import { WebSocketServer } from 'ws';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { startReferenceServer } from './reference-server.mjs';
+import { startReferenceServer, hostRuntimeSource, HOST_PATCH_VERSION } from './reference-server.mjs';
 import { projectDir, readJob, saveJob, mutateProject, sha256, productRoot } from './project-store.mjs';
 import { normalizeProject, transitionPair, transitionWindow, transitionConfig } from './transitions.mjs';
+import { withTimeout, evalBudget, writeAtomic, renameRetry, shotAssetIndex, segmentParts, segmentKey, missReason, cacheSummary, readCacheIndex, assertCoverage } from './render-cache.mjs';
 import { analyzeRhythm, beatLabel, motionSeries, RHYTHM_VERSION } from './rhythm.mjs';
 import { pageSample, pageComposeGrid, pageDrawChart } from './ae-page.mjs';
 import { browserPath, angleArgs } from './browser.mjs';
@@ -23,7 +24,18 @@ process.on('disconnect', () => controller.abort());
 const signal = controller.signal;
 let browser;
 let server;
+let frameSocket;
+let frameToken = null;
 let lastSave = 0;
+// LLM 写的场景可能死循环：page.evaluate 永不返回会把渲染进程和服务的任务队列一起挂住。
+// 超时直接关浏览器（不 abort：任务应记为 error 而不是 cancelled）。
+function evaluate(page, fn, arg, { frames = 1, label = '' } = {}) {
+  const ms = evalBudget(frames);
+  return withTimeout(page.evaluate(fn, arg), ms, () => {
+    void browser?.close();
+    return new Error(`${label || '渲染页'}：${Math.round(ms / 1000)} 秒内没有返回，场景代码可能死循环或卡住（可用 VIDEOGRAPH_EVAL_TIMEOUT_MS 调整单帧预算）`);
+  });
+}
 function progress(detail, value) {
   job.detail = detail; job.progress = value;
   if (Date.now() - lastSave > 500 || value === 1) { saveJob(projectId, job); lastSave = Date.now(); }
@@ -55,12 +67,11 @@ async function renderSegment(page, shot, output, fps, samples, doneFrames, total
   // （否则编码器与管道会把渲染进程挂住，服务的任务队列随之卡死）。半成品写在临时文件里，不会进入分段缓存。
   const stopEncoder = () => { encoder.stdin.destroy(); if (encoder.exitCode === null && encoder.signalCode === null) encoder.kill('SIGKILL'); };
   const token = randomUUID();
-  const socket = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: width * height * 4 + 1024,
-    verifyClient: ({ req, origin }) => req.url === `/${token}` && origin === server.url });
-  await once(socket, 'listening');
+  frameToken = token;
+  const socket = frameSocket;
   let received = 0;
   let chain = Promise.resolve();
-  socket.on('connection', (ws) => {
+  const onConnection = (ws) => {
     ws.on('message', (buffer, binary) => {
       chain = chain.then(async () => {
         signal.throwIfAborted();
@@ -71,11 +82,13 @@ async function renderSegment(page, shot, output, fps, samples, doneFrames, total
         progress(`渲染 ${shot.title} · ${received}/${count} 帧`, (doneFrames + received) / totalFrames);
       }).catch((error) => { failure = error; ws.terminate(); stopEncoder(); void page.close(); });
     });
-  });
+  };
+  socket.on('connection', onConnection);
   const cancel = () => { for (const ws of socket.clients) ws.terminate(); stopEncoder(); void page.close(); };
   signal.addEventListener('abort', cancel, { once: true });
   try {
-    await page.evaluate((options) => window.__pdoom.stream(options), { from: first / fps, to: last / fps, fps, samples, shutter: 0.2, inflight: 2, ws: `ws://127.0.0.1:${socket.address().port}/${token}` });
+    await evaluate(page, (options) => window.__pdoom.stream(options), { from: first / fps, to: last / fps, fps, samples, shutter: 0.2, inflight: 2, ws: `ws://127.0.0.1:${socket.address().port}/${token}` },
+      { frames: count * Math.max(1, typeof samples === 'number' ? samples : 4), label: `${shot.id} 分段渲染` });
     await chain;
     const deadline = Date.now() + 30000;
     while (received < count && !failure && Date.now() < deadline) {
@@ -90,8 +103,9 @@ async function renderSegment(page, shot, output, fps, samples, doneFrames, total
     if (code !== 0) throw new Error(`encoder exit ${code}: ${stderr}`);
   } finally {
     signal.removeEventListener('abort', cancel);
+    socket.off('connection', onConnection);
+    frameToken = null;
     for (const ws of socket.clients) ws.terminate();
-    await new Promise((resolve) => socket.close(resolve));
     if (encoder.exitCode === null) stopEncoder();
   }
 }
@@ -99,7 +113,7 @@ async function renderSegment(page, shot, output, fps, samples, doneFrames, total
 // 在渲染页内把 PNG 缩放到目标宽度：不引入 ffmpeg 依赖，真实引擎与测试夹具引擎同样适用。
 async function scalePng(page, base64, width) {
   if (!width) return base64;
-  return page.evaluate(async ({ base64, width }) => {
+  return evaluate(page, async ({ base64, width }) => {
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -111,7 +125,7 @@ async function scalePng(page, base64, width) {
     canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     bitmap.close();
     return canvas.toDataURL('image/png').split(',')[1];
-  }, { base64, width });
+  }, { base64, width }, { label: '缩放静帧' });
 }
 
 try {
@@ -124,7 +138,8 @@ try {
   for (const [path, hash] of manifest.files) {
     if (sha256(readFileSync(join(dir, 'engine', path))) !== hash) throw new Error(`引擎快照被外部修改：${path}；请重新导入或通过镜头源码工具创建新版本。`);
   }
-  const hostHash = sha256(Buffer.concat(['reference-server.mjs', 'transition-runtime.mjs', 'transitions.mjs', '../fx/runtime.mjs'].map((name) => readFileSync(new URL(name, import.meta.url)))));
+  // 只哈希真正注入渲染页的宿主代码与补丁版本；整份 reference-server/transitions 源码任何无关改动都会让全片分段缓存失效。
+  const hostHash = sha256(`${HOST_PATCH_VERSION}\n${hostRuntimeSource()}`);
   const fps = job.input.fps ?? frozen.output.fps;
   const samples = job.input.samples ?? frozen.output.samples;
   let shots = frozen.shots.map((shot) => ({ ...shot, start: Math.round(shot.start * fps) / fps, end: Math.round(shot.end * fps) / fps }));
@@ -142,7 +157,10 @@ try {
         : shot.id === target.toShotId && sources.right ? { ...shot, ...structuredClone(sources.right) } : shot);
     } else shots = shots.map((shot) => shot.id === target.id ? { ...shot, ...structuredClone(target.reviewBaseline) } : shot);
   }
-  server = await startReferenceServer({ root: join(dir, 'engine'), shots, transitions, fps, audioFile: frozen.audio.engineFile });
+  frameSocket = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 1920 * 1080 * 4 + 1024,
+    verifyClient: ({ req, origin }) => frameToken !== null && req.url === `/${frameToken}` && origin === server?.url });
+  await once(frameSocket, 'listening');
+  server = await startReferenceServer({ root: join(dir, 'engine'), shots, transitions, fps, audioFile: frozen.audio.engineFile, framePort: frameSocket.address().port });
   browser = await chromium.launch({ headless: true, executablePath: browserPath(),
     args: [...angleArgs(), '--ignore-gpu-blocklist', '--enable-gpu-rasterization', '--disable-background-timer-throttling'] });
   signal.addEventListener('abort', () => { void browser?.close(); }, { once: true });
@@ -158,7 +176,7 @@ try {
     const only = [previousId, shot.id].filter(Boolean).join(',');
     await page.goto(`${server.url}/?export=1&only=${encodeURIComponent(only)}`);
     await page.waitForFunction(() => window.__pdoom?.ready || window.__pdoom?.error, null, { timeout: 120000 });
-    const error = await page.evaluate(() => window.__pdoom.error || window.__pdoom.errors.join('\n'));
+    const error = await evaluate(page, () => window.__pdoom.error || window.__pdoom.errors.join('\n'), undefined, { label: `${shot.id} 加载` });
     if (error) throw new Error(error);
   }
   // FB-03 stills：用与导出相同的引擎/加载路径渲染指定时间点；缓存键 = 版本输入 + t + 宽度。
@@ -186,14 +204,14 @@ try {
       const file = join(dir, 'artifacts', `${key}.png`);
       if (!existsSync(file)) {
         mkdirSync(join(dir, 'artifacts'), { recursive: true });
-        await page.evaluate((t) => window.__pdoom.still(t, 1, .2), time);
-        const png = await scalePng(page, await page.evaluate(() => window.__pdoom.png()), stillsInput.width);
-        writeFileSync(file, Buffer.from(png, 'base64'));
+        await evaluate(page, (t) => window.__pdoom.still(t, 1, .2), time, { label: `${stillsInput.targetId} 静帧 ${time}s` });
+        const png = await scalePng(page, await evaluate(page, () => window.__pdoom.png(), undefined, { label: `${stillsInput.targetId} 截图` }), stillsInput.width);
+        writeAtomic(file, Buffer.from(png, 'base64'));
       }
       images.push({ t: time, file: `artifacts/${key}.png`, contentHash: artifactHash(`artifacts/${key}.png`) });
       progress(`静帧 ${time.toFixed(3)}s · ${index + 1}/${stillsInput.times.length}`, (index + 1) / stillsInput.times.length);
     }
-    const errors = await page.evaluate(() => window.__pdoom.errors);
+    const errors = await evaluate(page, () => window.__pdoom.errors, undefined, { label: stillsInput.targetId });
     if (errors.length || browserErrors.length) throw new Error(`${stillsInput.targetId}: ${[...errors, ...browserErrors].join('\n')}`);
     job.result = { revision: frozen.revision, stills: { ...stillsInput, images } };
   }
@@ -210,11 +228,15 @@ try {
       return { id: shot.id, code: readCode(shot), start: shot.start, end: shot.end, params: shot.params, post: shot.post, effects: shot.effects,
         incoming: incoming ? { config: transitionConfig(incoming), from: previous?.module ? readCode(previous) : null } : null };
     };
-    const keyFor = (involved) => sha256(JSON.stringify({ engine: frozen.engineHash, hostHash, browser: browser.version(), scope: `ae-${job.kind}`, input, shots: involved.map(shotKey), version: 'ae-v2' }));
+    // ae-page.mjs 的采样/拼图算法就是这些产物的输入，改它必须让缓存失效。
+    const aeHash = sha256(readFileSync(new URL('./ae-page.mjs', import.meta.url)));
+    const keyFor = (involved) => sha256(JSON.stringify({ engine: frozen.engineHash, hostHash, aeHash, browser: browser.version(), scope: `ae-${job.kind}`, input, shots: involved.map(shotKey), version: 'ae-v2' }));
     const shotAt = (t) => shots.find((shot) => t >= shot.start - 1e-6 && t < shot.end - 1e-6) ?? shots[shots.length - 1];
     const ensureModule = (shot) => { if (!shot.module) throw new Error(`${shot.id} 还没有源码：先 project_shot_submit`); };
     mkdirSync(join(dir, 'artifacts'), { recursive: true });
-    const save = (key, png) => { writeFileSync(join(dir, 'artifacts', `${key}.png`), Buffer.from(png, 'base64')); return `artifacts/${key}.png`; };
+    const save = (key, png) => { writeAtomic(join(dir, 'artifacts', `${key}.png`), Buffer.from(png, 'base64')); return `artifacts/${key}.png`; };
+    const sampleShot = (shot, options) => evaluate(page, pageSample, options, { frames: options.times.length, label: `${shot.id} 采样` });
+    const compose = (fn, arg) => evaluate(page, fn, arg, { label: '拼图' });
     const groups = (times) => {
       const map = new Map();
       for (const t of times) { const shot = shotAt(t); if (!map.has(shot.id)) map.set(shot.id, { shot, times: [] }); map.get(shot.id).times.push(t); }
@@ -232,7 +254,7 @@ try {
         for (const { shot, times } of groups(input.times)) {
           ensureModule(shot);
           await loadShot(shot, previousOf(shot));
-          const sample = await page.evaluate(pageSample, { times, sequential: false, thumbWidth: input.thumbWidth });
+          const sample = await sampleShot(shot, { times, sequential: false, thumbWidth: input.thumbWidth });
           checkErrors(sample, shot);
           const index = shots.indexOf(shot) + 1;
           times.forEach((t, i) => {
@@ -242,7 +264,7 @@ try {
           done += times.length;
           progress(`帧序列 ${done}/${input.times.length}`, done / input.times.length);
         }
-        save(key, await page.evaluate(pageComposeGrid, { tiles, columns: input.columns, tileWidth: input.thumbWidth, title: `帧序列 · ${input.label} · ${input.times.length} 帧 · 橙框=下拍` }));
+        save(key, await compose(pageComposeGrid, { tiles, columns: input.columns, tileWidth: input.thumbWidth, title: `帧序列 · ${input.label} · ${input.times.length} 帧 · 橙框=下拍` }));
       }
       job.result = { revision: frozen.revision, images: [{ file: `artifacts/${key}.png`, kind: 'filmstrip', contentHash: sha256(readFileSync(join(dir, 'artifacts', `${key}.png`))) }], times: input.times,
         labels: input.times.map((t) => beatLabel(frozen.song, t, 0.5 / fps).text) };
@@ -259,12 +281,12 @@ try {
           const times = input.ratios.map((ratio) => Math.min(shot.end - 1 / fps, shot.start + (shot.end - shot.start) * ratio));
           if (!shot.module) { for (const _ of times) tiles.push({ placeholder: '未生成源码', lines: [head, sub] }); continue; }
           await loadShot(shot, previousOf(shot));
-          const sample = await page.evaluate(pageSample, { times, sequential: false, thumbWidth: input.thumbWidth });
+          const sample = await sampleShot(shot, { times, sequential: false, thumbWidth: input.thumbWidth });
           checkErrors(sample, shot);
           sample.thumbs.forEach((png) => tiles.push({ png, lines: [head, sub] }));
           progress(`全片缩略图 ${index + 1}/${shots.length}`, (index + 1) / shots.length);
         }
-        save(key, await page.evaluate(pageComposeGrid, { tiles, columns: input.columns, tileWidth: input.thumbWidth, title: `全片缩略图 · ${shots.length} 镜头 · 每镜 ${input.ratios.length} 帧（${input.ratios.join('/')}）` }));
+        save(key, await compose(pageComposeGrid, { tiles, columns: input.columns, tileWidth: input.thumbWidth, title: `全片缩略图 · ${shots.length} 镜头 · 每镜 ${input.ratios.length} 帧（${input.ratios.join('/')}）` }));
       }
       job.result = { revision: frozen.revision, images: [{ file: `artifacts/${key}.png`, kind: 'contact-sheet', contentHash: sha256(readFileSync(join(dir, 'artifacts', `${key}.png`))) }],
         shots: shots.map((shot, index) => ({ index: index + 1, id: shot.id, title: shot.title, start: shot.start, end: shot.end, status: shot.status })) };
@@ -292,20 +314,19 @@ try {
         for (let offset = 0; offset < own.length; offset += 60) {
           // 每段第一帧 seek，其余连续渲染；分块只是为了进度与单次 evaluate 体积。
           const chunk = own.slice(offset, offset + 60);
-          const sample = await page.evaluate(pageSample, { times: chunk, sequential: true, seekFirst: offset === 0, dt: 1 / sampleFps, gray: { w: 64, h: 36 } });
+          const sample = await sampleShot(shot, { times: chunk, sequential: true, seekFirst: offset === 0, dt: 1 / sampleFps, gray: { w: 64, h: 36 } });
           checkErrors(sample, shot);
           for (const gray of sample.grays) frames.push(new Uint8Array(Buffer.from(gray, 'base64')));
           progress(`节奏采样 ${frames.length}/${times.length} 帧`, frames.length / times.length * 0.97);
         }
       }
-      writeFileSync(`${framesFile}.tmp`, Buffer.concat(frames.map((frame) => Buffer.from(frame))));
-      renameSync(`${framesFile}.tmp`, framesFile);
+      writeAtomic(framesFile, Buffer.concat(frames.map((frame) => Buffer.from(frame))));
     }
     const { motion, luma, ink, levelMotion } = motionSeries(frames, Math.max(1, Math.round(sampleFps / 15)));
     const analysis = analyzeRhythm(frozen.song, { fps: sampleFps, t: times, motion, luma, ink, levelMotion }, { shots, label: input.label });
     const key = sha256(`${framesKey}:${RHYTHM_VERSION}`);
-    if (!existsSync(join(dir, 'artifacts', `${key}.png`))) save(key, await page.evaluate(pageDrawChart, analysis.chart));
-    writeFileSync(join(dir, 'artifacts', `${key}.json`), JSON.stringify({ text: analysis.text, metrics: analysis.metrics, bars: analysis.bars }));
+    if (!existsSync(join(dir, 'artifacts', `${key}.png`))) save(key, await compose(pageDrawChart, analysis.chart));
+    writeAtomic(join(dir, 'artifacts', `${key}.json`), JSON.stringify({ text: analysis.text, metrics: analysis.metrics, bars: analysis.bars }));
     job.result = { revision: frozen.revision, text: analysis.text, metrics: analysis.metrics, images: [{ file: `artifacts/${key}.png`, kind: 'rhythm-chart', contentHash: sha256(readFileSync(join(dir, 'artifacts', `${key}.png`))) }], report: `artifacts/${key}.json` };
   }
 
@@ -320,6 +341,12 @@ try {
   const wanted = targetTransition ? shots.filter((shot) => shot.id === targetTransition.toShotId) : job.kind === 'validate' ? shots.filter((shot) => shot.id === job.input.shotId) : shots;
   if (!wanted.length) throw new Error('没有可渲染镜头');
   const total = Math.round(frozen.song.duration * fps);
+  if (job.kind === 'export') assertCoverage(shots, fps, total);
+  const frameCount = (shot) => Math.round(shot.end * fps) - Math.round(shot.start * fps);
+  const assetsOf = shotAssetIndex(join(dir, 'engine'));
+  const cacheIndexFile = join(dir, 'artifacts', 'cache-index.json');
+  const cacheIndex = readCacheIndex(cacheIndexFile);
+  const browserVersion = browser.version();
   let doneFrames = 0;
   const segments = [], reports = [];
   for (const shot of wanted) {
@@ -332,7 +359,10 @@ try {
     if (previous?.status === 'needs-generation') throw new Error(`${previous.id} 尚未完成改写，不能验证相邻转场`);
     const dependency = incoming ? { config: transitionConfig(incoming), from: { start: previous.start, end: previous.end, params: previous.params, post: previous.post, effects: previous.effects,
       code: readFileSync(join(dir, `engine/app/src/scenes/${previous.module}.ts`), 'utf8') } } : null;
-    const key = sha256(JSON.stringify({ engine: frozen.engineHash, hostHash, browser: browser.version(), code, dependency, scope: targetTransition ? 'transition' : 'shot', shot: { start: shot.start, end: shot.end, params: shot.params, post: shot.post, effects: shot.effects }, fps, samples, encoder: 'x264-crf18-veryfast-bt709-v1' }));
+    // 前一镜头只在有入场转场时进入键（转场窗口内会渲染它）；硬切镜头互不影响缓存。
+    const parts = segmentParts({ engine: frozen.engineHash, host: hostHash, browser: browserVersion, code, dependency, shot, assets: assetsOf(shot.id),
+      fps, samples, encoder: 'x264-crf18-veryfast-bt709-v1', scope: targetTransition ? 'transition' : 'shot' });
+    const key = segmentKey(parts);
     const publishValidation = (validation) => mutateProject(projectId, undefined, (project) => {
       const current = project.shots.find((entry) => entry.id === shot.id);
       const currentTransition = incoming ? project.transitions.find((entry) => entry.id === incoming.id) : null;
@@ -346,43 +376,53 @@ try {
     });
     const file = join(dir, 'artifacts', `${key}.mp4`);
     const meta = join(dir, 'artifacts', `${key}.json`);
-    const cached = existsSync(file) && existsSync(meta) && JSON.parse(readFileSync(meta, 'utf8')).hash === sha256(readFileSync(file));
+    const metaData = existsSync(file) && existsSync(meta) ? JSON.parse(readFileSync(meta, 'utf8')) : null;
+    const cached = metaData !== null && metaData.frames === frameCount(shot) && metaData.hash === sha256(readFileSync(file));
+    const indexKey = targetTransition ? `transition:${targetTransition.id}` : shot.id;
     if (job.kind === 'export' && cached) {
       const validation = { samples: 5, inputToken: shot.inputToken, key, thumb: `${key}.png`, checkedAt: Date.now(), cached: true };
       publishValidation(validation);
-      doneFrames += Math.round((shot.end - shot.start) * fps);
+      doneFrames += frameCount(shot);
       segments.push(file); reports.push({ shotId: shot.id, cached: true, key });
+      cacheIndex[indexKey] = parts;
       progress(`复用 ${shot.title}`, doneFrames / total);
       continue;
     }
+    const reason = job.kind === 'export' ? missReason(cacheIndex[indexKey], parts) : undefined;
     await loadShot(shot, previous);
     const window = targetTransition ? transitionWindow({ ...frozen, shots }, targetTransition, fps) : null;
     const sampleTimes = window ? (window.frames ? [window.start - 1 / fps, window.start, (window.start + window.end) / 2, window.end, window.end + 1 / fps]
       : [-2, -1, 0, 1, 2].map((frame) => window.start + frame / fps)).map((t) => Math.max(previous.start, Math.min(shot.end - 1 / fps, t)))
       : [0, .25, .45, .75, .99].map((ratio) => shot.start + (shot.end - shot.start) * ratio);
-    for (const t of sampleTimes) await page.evaluate((t) => window.__pdoom.still(t, 1, .2), t);
-    const errors = await page.evaluate(() => window.__pdoom.errors);
+    for (const t of sampleTimes) await evaluate(page, (t) => window.__pdoom.still(t, 1, .2), t, { label: `${shot.id} 抽检 ${t.toFixed(3)}s` });
+    const errors = await evaluate(page, () => window.__pdoom.errors, undefined, { label: shot.id });
     if (errors.length || browserErrors.length) throw new Error(`${shot.id}: ${[...errors, ...browserErrors].join('\n')}`);
     const previewTime = window ? (window.start + window.end) / 2 : shot.start + (shot.end - shot.start) * .45;
-    await page.evaluate((t) => window.__pdoom.still(t, 1, 0.2), previewTime);
-    const png = await page.evaluate(() => window.__pdoom.png());
+    await evaluate(page, (t) => window.__pdoom.still(t, 1, 0.2), previewTime, { label: `${shot.id} 缩略图` });
+    const png = await evaluate(page, () => window.__pdoom.png(), undefined, { label: `${shot.id} 截图` });
     const thumb = `${key}.png`;
-    writeFileSync(join(dir, 'artifacts', thumb), Buffer.from(png, 'base64'));
+    writeAtomic(join(dir, 'artifacts', thumb), Buffer.from(png, 'base64'));
     const validation = { samples: 5, times: sampleTimes, inputToken: shot.inputToken, key, thumb, checkedAt: Date.now() };
     publishValidation(validation);
     if (job.kind === 'export') {
       const temporary = join(dir, 'artifacts', `${key}-${jobId}.tmp.mp4`);
-      await renderSegment(page, shot, temporary, fps, samples, doneFrames, total);
-      const renderErrors = await page.evaluate(() => window.__pdoom.errors);
-      if (renderErrors.length || browserErrors.length) throw new Error(`${shot.id}: ${[...renderErrors, ...browserErrors].join('\n')}`);
-      renameSync(temporary, file);
-      writeFileSync(meta, JSON.stringify({ hash: sha256(readFileSync(file)), frames: Math.round(shot.end * fps) - Math.round(shot.start * fps), key }));
+      try {
+        await renderSegment(page, shot, temporary, fps, samples, doneFrames, total);
+        const renderErrors = await evaluate(page, () => window.__pdoom.errors, undefined, { label: shot.id });
+        if (renderErrors.length || browserErrors.length) throw new Error(`${shot.id}: ${[...renderErrors, ...browserErrors].join('\n')}`);
+        renameRetry(temporary, file);
+      } finally { rmSync(temporary, { force: true }); }
+      writeAtomic(meta, JSON.stringify({ hash: sha256(readFileSync(file)), frames: frameCount(shot), key }));
       segments.push(file);
-      doneFrames += Math.round(shot.end * fps) - Math.round(shot.start * fps);
+      doneFrames += frameCount(shot);
+      cacheIndex[indexKey] = parts;
+      writeAtomic(cacheIndexFile, JSON.stringify(cacheIndex));
     }
-    reports.push({ shotId: shot.id, ...(targetTransition ? { transitionId: targetTransition.id } : {}), cached: false, ...validation });
+    reports.push({ shotId: shot.id, ...(targetTransition ? { transitionId: targetTransition.id } : {}), cached: false, ...(reason ? { missReason: reason } : {}), ...validation });
   }
   if (job.kind === 'export') {
+    if (doneFrames !== total) throw new Error(`分段合计 ${doneFrames} 帧，整曲应为 ${total} 帧；已停止合成以免音画不同步`);
+    writeAtomic(cacheIndexFile, JSON.stringify(cacheIndex));
     const outDir = join(dir, 'exports', jobId); mkdirSync(outDir, { recursive: true });
     const list = join(outDir, 'segments.txt');
     writeFileSync(list, segments.map((path) => `file '${path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
@@ -390,7 +430,7 @@ try {
     progress('合成全片并封装完整 BGM…', 0.99);
     await runFfmpeg(['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-i', join(dir, 'engine', frozen.audio.engineFile ?? 'audio/pdoom.mp3'),
       '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '320k', '-af', 'apad', '-t', String(total / fps), '-movflags', '+faststart', output]);
-    job.result = { file: `exports/${jobId}/pv.mp4`, frames: total, seconds: total / fps, fps, samples, revision: frozen.revision, transitions: frozen.transitions.map(({ id, fromShotId, toShotId, mode, duration, easing, direction }) => ({ id, fromShotId, toShotId, mode, duration, easing, direction })), reports };
+    job.result = { file: `exports/${jobId}/pv.mp4`, frames: total, seconds: total / fps, fps, samples, revision: frozen.revision, transitions: frozen.transitions.map(({ id, fromShotId, toShotId, mode, duration, easing, direction }) => ({ id, fromShotId, toShotId, mode, duration, easing, direction })), reports, cacheSummary: cacheSummary(reports) };
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ ...job.result, engineHash: frozen.engineHash, audioHash: frozen.audio.hash, credits: frozen.credits }, null, 2));
   } else if (!['stills', 'filmstrip', 'contact-sheet', 'rhythm'].includes(job.kind)) job.result = { revision: frozen.revision, reports };
   }
@@ -401,5 +441,6 @@ try {
 } finally {
   await browser?.close();
   await server?.close();
+  frameSocket?.close();
   if (process.connected) process.disconnect();
 }

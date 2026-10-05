@@ -9,14 +9,15 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { createFixtureProject, fixtureScene } from './helpers.mjs';
+import { freePort } from '../helpers/free-port.mjs';
 import { browserPath, angleArgs } from '../../../src/server/browser.mjs';
 
 const root = fileURLToPath(new URL('../../..', import.meta.url));
 const tmp = mkdtempSync(join(tmpdir(), 'videograph-fb02-ui-'));
 const projects = join(tmp, 'projects');
 const tokenFile = join(tmp, 'service-token');
-const servicePort = 5900 + Math.floor(Math.random() * 200);
-const studioPort = 6100 + Math.floor(Math.random() * 200);
+const servicePort = await freePort();
+const studioPort = await freePort();
 const serviceBase = `http://127.0.0.1:${servicePort}`;
 const studioBase = `http://127.0.0.1:${studioPort}`;
 let service, vite, browser;

@@ -11,12 +11,13 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { createFixtureProject } from '../feedback/helpers.mjs';
+import { freePort } from '../helpers/free-port.mjs';
 
 const root = fileURLToPath(new URL('../../..', import.meta.url));
 const tmp = mkdtempSync(join(tmpdir(), 'videograph-ae-'));
 const projects = join(tmp, 'projects');
 const tokenFile = join(tmp, 'service-token');
-const port = 5900 + Math.floor(Math.random() * 90);
+const port = await freePort();
 const base = `http://127.0.0.1:${port}`;
 let service, client, projectId;
 

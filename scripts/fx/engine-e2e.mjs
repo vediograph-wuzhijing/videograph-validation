@@ -5,11 +5,12 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, copyFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { freePort } from '../tests/helpers/free-port.mjs';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const work = join(root, '.cache/fx-e2e');
 rmSync(work, { recursive: true, force: true }); mkdirSync(join(work, 'projects'), { recursive: true });
-const port = 5391, base = `http://127.0.0.1:${port}`, tokenFile = join(work, 'token');
+const port = await freePort(), base = `http://127.0.0.1:${port}`, tokenFile = join(work, 'token');
 const service = spawn(process.execPath, ['--no-warnings', 'src/server/index.mjs'], { cwd: root, stdio: 'inherit',
   env: { ...process.env, VIDEOGRAPH_SERVICE_PORT: String(port), VIDEOGRAPH_PROJECTS: join(work, 'projects'), VIDEOGRAPH_SERVICE_TOKEN_FILE: tokenFile, VIDEOGRAPH_STUDIO_ORIGINS: 'http://127.0.0.1:5388' } });
 for (let i = 0; i < 100 && !existsSync(tokenFile); i++) await new Promise((r) => setTimeout(r, 100));

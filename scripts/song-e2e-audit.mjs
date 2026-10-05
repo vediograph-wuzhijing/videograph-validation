@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { freePort } from './tests/helpers/free-port.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const audioPath = resolve(process.argv[2] ?? join(root, '.cache/e2e-song/click132.wav'));
@@ -14,7 +15,7 @@ if (!existsSync(audioPath)) throw new Error(`音频不存在：${audioPath}`);
 const work = join(root, '.cache/e2e-song/run');
 if (!process.argv.includes('--keep')) rmSync(work, { recursive: true, force: true });
 mkdirSync(work, { recursive: true });
-const port = Number(process.env.SONG_E2E_PORT ?? 5291);
+const port = Number(process.env.SONG_E2E_PORT) || await freePort();
 Object.assign(process.env, {
   VIDEOGRAPH_SERVICE_PORT: String(port), VIDEOGRAPH_SERVICE_URL: `http://127.0.0.1:${port}`,
   VIDEOGRAPH_SERVICE_TOKEN_FILE: join(work, 'service-token'), VIDEOGRAPH_PROJECTS: join(work, 'projects'),

@@ -1,7 +1,7 @@
 // fetcher.mjs — FX-00：按需从上游下载动效/案例来源（不随本仓库分发）。
 // 本仓库只保存 effects/sources.json（地址、固定 commit、许可、允许的文件规则）；文件在用户机器上
 // 按固定 commit 从 GitHub 下载，用 git blob SHA-1 校验内容，逐文件判定许可，写入 .cache/fx（不入库）。
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -96,7 +96,7 @@ export function selectFiles(source, tree, prefix = '') {
 const sourceDir = (source) => join(fxCacheRoot(), source.id, source.commit);
 function writeAtomic(path, data) {
   mkdirSync(dirname(path), { recursive: true });
-  const temporary = `${path}.${process.pid}.tmp`;
+  const temporary = `${path}.${randomUUID()}.tmp`;
   writeFileSync(temporary, data);
   renameSync(temporary, path);
 }
@@ -108,15 +108,27 @@ function cachePath(source, path) {
   return full;
 }
 
-/** 只允许登记的主机；api.github.com 可用 GITHUB_TOKEN 提高限额（不记录、不回显）。 */
-async function httpGet(registry, url, { fetchImpl = fetch, json = false } = {}) {
+/** 只允许登记的主机（重定向后的最终地址同样检查）；api.github.com 可用 GITHUB_TOKEN 提高限额（不记录、不回显）。
+ * maxBytes：按文件树登记的大小限制读取，避免异常响应在校验前就占满内存。 */
+async function httpGet(registry, url, { fetchImpl = fetch, json = false, maxBytes } = {}) {
+  const allowed = (parsed) => parsed.protocol === 'https:' && (registry.policy.hosts ?? []).includes(parsed.hostname);
   const parsed = new URL(url);
-  check(parsed.protocol === 'https:' && (registry.policy.hosts ?? []).includes(parsed.hostname), `不允许的下载地址：${parsed.hostname}`);
+  check(allowed(parsed), `不允许的下载地址：${parsed.hostname}`);
   const headers = { 'user-agent': 'videograph-fx-fetcher' };
   if (parsed.hostname === 'api.github.com' && process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
   const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(60000) });
+  if (response.url) check(allowed(new URL(response.url)), `重定向到不允许的地址：${new URL(response.url).hostname}`);
   if (!response.ok) throw new FxError(`下载失败 HTTP ${response.status}：${parsed.hostname}${parsed.pathname}${response.status === 403 ? '（GitHub API 匿名限额 60 次/小时，可设置 GITHUB_TOKEN）' : ''}`);
-  return json ? response.json() : Buffer.from(await response.arrayBuffer());
+  if (json) return response.json();
+  if (maxBytes === undefined || !response.body) return Buffer.from(await response.arrayBuffer());
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body) {
+    size += chunk.length;
+    if (size > maxBytes) { await response.body.cancel?.().catch(() => {}); throw new FxError(`${parsed.pathname}: 内容校验失败（响应超过登记大小 ${maxBytes} 字节）`); }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 /** 固定 commit 的文件树；缓存后永不过期（commit 不可变）。 */
@@ -138,18 +150,20 @@ function readLedger(source) {
 
 /**
  * 确保这些文件已在本机缓存：下载 → 校验 git blob SHA → 判定许可 → 原子写入。
- * 许可不在白名单的文件不落盘，记入 rejected。返回 { fetched, cached, rejected }。
+ * 许可不在白名单的文件不落盘，记入 rejected。单个文件下载/校验失败记入 failed，不影响其他文件入账；
+ * 全部失败且没有任何可用文件时抛出第一个错误。返回 { fetched, cached, rejected, failed, pending }。
  */
 export async function ensureFiles(registry, source, entries, { fetchImpl = fetch, concurrency = 8, deadline = Infinity } = {}) {
   check(source.downloadable !== false, `${source.id}: 许可不明，只登记链接、不下载`);
   const ledger = readLedger(source);
-  const result = { fetched: [], cached: [], rejected: [], pending: 0 };
+  const result = { fetched: [], cached: [], rejected: [], failed: [], pending: 0 };
+  const updates = { files: {}, rejected: {}, cleared: [] };
   const queue = entries.filter((entry) => {
     const prior = ledger.rejected[entry.path];
     // 拒绝记录保存原始声明：许可白名单或规范化规则变了就重新判定，而不是永久拒绝。
     // 旧格式（纯字符串、无原始声明）的记录无法复判，直接重新下载判定。
     if (prior && typeof prior === 'object' && !(prior.license && licenseAllowed(registry.policy, normalizeLicense(prior.license)))) { result.rejected.push({ path: entry.path, reason: prior.reason }); return false; }
-    if (prior) delete ledger.rejected[entry.path];
+    if (prior) updates.cleared.push(entry.path);
     if (ledger.files[entry.path] && existsSync(cachePath(source, entry.path))) { result.cached.push(entry.path); return false; }
     return true;
   });
@@ -157,23 +171,39 @@ export async function ensureFiles(registry, source, entries, { fetchImpl = fetch
     // deadline：到时不再取新文件（MCP 客户端常见 60 秒超时），已下载的照常落盘，下次调用续传。
     for (let entry = queue.shift(); entry; entry = Date.now() < deadline ? queue.shift() : undefined) {
       const url = `https://raw.githubusercontent.com/${source.repo}/${source.commit}/${entry.path.split('/').map(encodeURIComponent).join('/')}`;
-      const content = await httpGet(registry, url, { fetchImpl });
-      check(gitBlobSha(content) === entry.sha, `${entry.path}: 内容校验失败（与固定 commit 的 git 哈希不一致）`);
-      const { license, attribution, basis } = licenseFor(source, entry.path, content);
-      if (!license || !licenseAllowed(registry.policy, license)) {
-        const reason = license ? `许可 ${license} 不在白名单` : '文件头没有许可声明';
-        ledger.rejected[entry.path] = { reason, license };
-        result.rejected.push({ path: entry.path, reason });
-        continue;
+      try {
+        const content = await httpGet(registry, url, { fetchImpl, maxBytes: entry.size });
+        check(gitBlobSha(content) === entry.sha, `${entry.path}: 内容校验失败（与固定 commit 的 git 哈希不一致）`);
+        const { license, attribution, basis } = licenseFor(source, entry.path, content);
+        if (!license || !licenseAllowed(registry.policy, license)) {
+          const reason = license ? `许可 ${license} 不在白名单` : '文件头没有许可声明';
+          updates.rejected[entry.path] = { reason, license };
+          result.rejected.push({ path: entry.path, reason });
+          continue;
+        }
+        writeAtomic(cachePath(source, entry.path), content);
+        updates.files[entry.path] = { sha: entry.sha, size: content.length, license, attribution, basis };
+        result.fetched.push(entry.path);
+      } catch (error) {
+        result.failed.push({ path: entry.path, error: String(error.message ?? error) });
       }
-      writeAtomic(cachePath(source, entry.path), content);
-      ledger.files[entry.path] = { sha: entry.sha, size: content.length, license, attribution, basis };
-      result.fetched.push(entry.path);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, queue.length)) }, worker));
-  result.pending = queue.length;
-  if (result.fetched.length || result.rejected.length) writeAtomic(join(sourceDir(source), 'provenance.json'), JSON.stringify(ledger, null, 2));
+  try {
+    await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, queue.length)) }, worker));
+  } finally {
+    result.pending = queue.length;
+    if (result.fetched.length || result.rejected.length || updates.cleared.length) {
+      // 写前重读并合并：另一个并发调用可能已经写入了别的文件记录。
+      const latest = readLedger(source);
+      for (const path of updates.cleared) delete latest.rejected[path];
+      Object.assign(latest.files, updates.files);
+      Object.assign(latest.rejected, updates.rejected);
+      for (const path of Object.keys(updates.files)) delete latest.rejected[path];
+      writeAtomic(join(sourceDir(source), 'provenance.json'), JSON.stringify(latest, null, 2));
+    }
+  }
+  if (result.failed.length && !result.fetched.length && !result.cached.length) throw new FxError(result.failed[0].error);
   return result;
 }
 
