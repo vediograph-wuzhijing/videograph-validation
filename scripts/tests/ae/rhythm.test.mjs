@@ -129,6 +129,26 @@ test('analyzeRhythm：每秒 >3 次全画面明暗交替 → 闪烁风险', () =
   assert.match(report.text, /闪烁风险/);
 });
 
+test('analyzeRhythm：长时间每秒一闪（低于光敏阈值）→ 持续整帧脉动提示，不算闪烁风险', () => {
+  const song = syntheticSong();
+  const series = syntheticSeries(song);
+  series.luma = series.t.map((t) => (t % 1 < 0.2 ? 0.9 : 0.3)); // 每秒亮一下：每秒 2 次明暗交替
+  const report = analyzeRhythm(song, series);
+  assert.equal(report.metrics.flash.risk, false);
+  assert.ok(report.metrics.flash.pulseSeconds >= 24, `pulseSeconds=${report.metrics.flash.pulseSeconds}`);
+  assert.match(report.text, /持续整帧明暗脉动/);
+  const calm = analyzeRhythm(song, syntheticSeries(song));
+  assert.equal(calm.metrics.flash.pulseSeconds, 0);
+  assert.doesNotMatch(calm.text, /持续整帧明暗脉动/);
+});
+
+test('analyzeRhythm：死区提示引导镜头内运动，不引导整帧闪白/震动', () => {
+  const song = syntheticSong();
+  const report = analyzeRhythm(song, syntheticSeries(song, { events: [] }));
+  assert.match(report.text, /死区/);
+  assert.match(report.text, /不要用整帧闪白、震动或逐拍推镜去填/);
+});
+
 test('analyzeRhythm：切点离拍会被指出；局部时间段只统计段内事件', () => {
   const song = syntheticSong();
   const report = analyzeRhythm(song, syntheticSeries(song, { from: 16, to: 24 }), { shots: [{ id: 'a', start: 0 }, { id: 'b', start: 17.25 }] });

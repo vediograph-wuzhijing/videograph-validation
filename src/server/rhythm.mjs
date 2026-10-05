@@ -285,6 +285,13 @@ export function analyzeRhythm(song, series, { shots = [], label = '' } = {}) {
   }
   const flashes = [];
   for (let i = 1; i < transitionsLuma.length; i++) if (transitionsLuma[i].sign !== transitionsLuma[i - 1].sign) flashes.push(transitionsLuma[i].t);
+  // 持续脉动：按整秒分桶，统计“这一秒内 ≥2 次全画面明暗交替”的秒数与最长连续段（低于闪烁风险阈值，但长时间如此观感疲劳）。
+  const flashBuckets = new Map();
+  for (const t of flashes) flashBuckets.set(Math.floor(t), (flashBuckets.get(Math.floor(t)) ?? 0) + 1);
+  let pulseSeconds = 0, pulseRun = 0, run = 0;
+  for (let second = Math.floor(start); second <= Math.floor(end); second++) {
+    if ((flashBuckets.get(second) ?? 0) >= 2) { pulseSeconds++; run++; pulseRun = Math.max(pulseRun, run); } else run = 0;
+  }
   let maxFlashPerSecond = 0, flashAt = null;
   for (let i = 0; i < flashes.length; i++) {
     const count = flashes.filter((t) => t >= flashes[i] && t < flashes[i] + 1).length;
@@ -301,7 +308,7 @@ export function analyzeRhythm(song, series, { shots = [], label = '' } = {}) {
     range: { start: +start.toFixed(3), end: +end.toFixed(3) }, sampleFps: fps, frames: times.length, toleranceMs: Math.round(tolerance * 1000),
     motion: { median: +median(motion).toFixed(4), peakThreshold: +threshold.toFixed(4), peaks: peaks.length, peaksPerSecond: +(peaks.length / Math.max(1e-6, end - start)).toFixed(2), peaksOnGrid: peaks.length ? +(onGrid / peaks.length).toFixed(3) : null },
     hits, correlation, sectionFollow, sections: sectionStats, deadZones, busyZones, flatZones,
-    flash: { maxPerSecond: maxFlashPerSecond, at: flashAt, risk: maxFlashPerSecond > 3 }, cuts: cutStats,
+    flash: { maxPerSecond: maxFlashPerSecond, at: flashAt, risk: maxFlashPerSecond > 3, pulseSeconds, pulseRun }, cuts: cutStats,
   };
 
   const pct = (value) => (value === null || value === undefined ? '—' : `${Math.round(value * 100)}%`);
@@ -318,9 +325,10 @@ export function analyzeRhythm(song, series, { shots = [], label = '' } = {}) {
   const loudRate = loudDownbeats.length ? loudDownbeats.filter((bar) => bar.downbeatHit).length / loudDownbeats.length : null;
   metrics.hits.loudDownbeatRate = loudRate === null ? null : +loudRate.toFixed(3);
   if (loudRate !== null && loudDownbeats.length >= 4 && loudRate < 0.25) hints.push(`高能量小节的下拍只有 ${pct(loudRate)} 有画面峰：响的段落可能缺少重音冲击（参考片全片下拍命中约 1/3，不需要每拍都砸）。`);
-  for (const zone of deadZones) hints.push(`死区 ${zone.from.toFixed(2)}–${zone.to.toFixed(2)}s（小节 ${zone.bars[0]}–${zone.bars[zone.bars.length - 1]}）：音乐高能量但画面几乎静止——若是刻意的反差（如副歌前的克制）可保留，否则加入随拍运动。`);
+  for (const zone of deadZones) hints.push(`死区 ${zone.from.toFixed(2)}–${zone.to.toFixed(2)}s（小节 ${zone.bars[0]}–${zone.bars[zone.bars.length - 1]}）：音乐高能量但画面几乎静止——若是刻意的反差（如副歌前的克制）可保留，否则让镜头里的主体或运镜动起来（人物动作、推移、换景、层次变化）；不要用整帧闪白、震动或逐拍推镜去填，那只会让数字好看、观感变差。`);
   for (const zone of busyZones) hints.push(`${zone.from.toFixed(2)}–${zone.to.toFixed(2)}s 音乐最安静、画面却在最激烈的一档：确认是否有意（开场钩子可以），否则留出呼吸。`);
-  for (const zone of flatZones) hints.push(`连续 ${zone.bars.length} 小节下拍无明显画面峰（${zone.from.toFixed(2)}–${zone.to.toFixed(2)}s）：若是刻意的连续运动可忽略，否则加入下拍脉冲。`);
+  for (const zone of flatZones) hints.push(`连续 ${zone.bars.length} 小节下拍无明显画面峰（${zone.from.toFixed(2)}–${zone.to.toFixed(2)}s）：若是刻意的连续运动可忽略，否则在少数重音小节的下拍安排镜头内的落点（动作到位、切入、换景）；不必每个下拍都有，也不要用整帧闪白或震动代替。`);
+  if (pulseSeconds >= 8 && pulseSeconds / Math.max(1, end - start) >= 0.2) hints.push(`全片有约 ${pulseSeconds} 秒在持续整帧明暗脉动（每秒 ≥2 次，最长连续 ${pulseRun} 秒）：长时间随拍闪白/推镜/震动容易让人疲劳，把整帧冲击留给少数重音，其余用镜头内的动作表达节奏。`);
   if (sectionFollow !== null && sectionFollow < -0.3) hints.push(`段落能量跟随 ${sectionFollow}（反向）：画面越到安静段越激烈，确认是否有意。`);
   if (!findings.length) findings.push('未发现需要修的节奏问题（指标只是尺子，审美仍由人判断）。');
 

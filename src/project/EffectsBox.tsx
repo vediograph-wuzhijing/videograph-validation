@@ -12,6 +12,9 @@ const loseContext = (previewer: EffectPreviewer) => {
   gl?.getExtension('WEBGL_lose_context')?.loseContext();
 };
 
+/** 详情预览画布 → 它的预览器。预览器与画布同寿命（见 EffectDetail）。 */
+const detailPreviewers = new WeakMap<HTMLCanvasElement, { previewer: EffectPreviewer; release: ReturnType<typeof setTimeout> | undefined }>();
+
 /** 卡片缩略图：整个特效箱只用一块 WebGL 画布逐个渲染成 dataURL；浏览器同时只保留约 16 个上下文，不能每次筛选都新建。 */
 function useThumbnails(effects: FxEffect[]) {
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
@@ -69,20 +72,33 @@ function EffectDetail({ effect, onClose, shotTitle, onSuggest, busy }: { effect:
   const [bpm, setBpm] = useState(120);
   const [error, setError] = useState('');
   const valuesRef = useRef(values); valuesRef.current = values;
+  // 一块画布只建一个预览器，上下文只在画布真正卸载后释放；切换素材/拍速/动效走 ref 读最新值。
+  // 原因：loseContext 之后同一块画布的 getContext 仍返回那个已丢失的上下文，在它上面重建预览器必然
+  // “着色器编译失败：null”。释放放到下一轮任务里，同一块画布被重新挂上（StrictMode 的二次挂载）时取消。
+  const liveRef = useRef({ effect, source, bpm }); liveRef.current = { effect, source, bpm };
   useEffect(() => {
     const canvas = canvasRef.current; if (!canvas) return;
-    let previewer: EffectPreviewer;
-    try { previewer = new EffectPreviewer(canvas); } catch (err) { setError(String(err)); return; }
-    let frame = 0; const start = performance.now();
-    const loop = () => {
-      const t = (performance.now() - start) / 1000;
-      try { previewer.render(effect, { values: valuesRef.current, t, source, toSource: 'shapes', bpm, progress: effect.kind === 'transition' ? Math.min(1, Math.max(0, ((t % 3) - 0.6) / 1.6)) : undefined }); setError(''); }
+    let held = detailPreviewers.get(canvas);
+    if (held) clearTimeout(held.release);
+    else {
+      try { held = { previewer: new EffectPreviewer(canvas), release: undefined }; detailPreviewers.set(canvas, held); }
       catch (err) { setError(String(err)); return; }
+    }
+    const { previewer } = held;
+    let frame = 0, failed = ''; const start = performance.now();
+    const loop = () => {
+      const t = (performance.now() - start) / 1000, live = liveRef.current;
+      // 出错后不停表：换到能编译通过的动效或素材时，预览自己恢复，错误提示同步清掉。
+      try { previewer.render(live.effect, { values: valuesRef.current, t, source: live.source, toSource: 'shapes', bpm: live.bpm, progress: live.effect.kind === 'transition' ? Math.min(1, Math.max(0, ((t % 3) - 0.6) / 1.6)) : undefined }); if (failed) { failed = ''; setError(''); } }
+      catch (err) { const message = String(err); if (message !== failed) { failed = message; setError(message); } }
       frame = requestAnimationFrame(loop);
     };
     frame = requestAnimationFrame(loop);
-    return () => { cancelAnimationFrame(frame); loseContext(previewer); };
-  }, [effect, source, bpm]);
+    return () => {
+      cancelAnimationFrame(frame);
+      held.release = setTimeout(() => { detailPreviewers.delete(canvas); loseContext(previewer); }, 0);
+    };
+  }, []);
   const changed = Object.entries(values).filter(([name, value]) => JSON.stringify(value) !== JSON.stringify(effect.params[name]?.default));
   const suggestion = `请为此镜头套用特效箱「${effect.name}」（${effect.id}）${changed.length ? `，参数 ${changed.map(([name, value]) => `${name}=${typeof value === 'number' ? +value.toFixed(4) : value}`).join('，')}` : '（默认参数）'}。套用后用 project_filmstrip 自查节拍与画面，保留歌词时序与配色意图。`;
   return <div className="fx-detail" role="dialog" aria-modal="true" aria-label={`${effect.name} 预览`} onKeyDown={(event) => { if (event.key === 'Escape') onClose(); }}>
@@ -159,6 +175,6 @@ export function EffectsBox({ projectId, shotId, shotTitle, shotRevision, busy, o
     </button>)}</div>
     {!visible.length && <p className="project-note">没有匹配的动效。</p>}
     {notice && open && <p className="fx-notice" role="status">{notice}</p>}
-    {open && <EffectDetail effect={open} onClose={() => setOpen(null)} shotTitle={target?.title ?? target?.shotId} busy={busy || submitting} onSuggest={target ? (text) => void suggest(text) : undefined} />}
+    {open && <EffectDetail key={open.id} effect={open} onClose={() => setOpen(null)} shotTitle={target?.title ?? target?.shotId} busy={busy || submitting} onSuggest={target ? (text) => void suggest(text) : undefined} />}
   </div>;
 }
