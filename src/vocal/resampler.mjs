@@ -1,14 +1,19 @@
-// resampler.mjs — 经典重采样器命令行契约调用（VOCAL-M1）。
-// 契约对齐 openutau/OpenUtau Classic/ExeResampler.cs（2026-10-06 核对）：
-//   <input> <output> <音名> <velocity> <flags> <offset> <durRequired> <consonant> <cutoff> <volume> <modulation> !<tempo> <base64pitches>
-// 音名 = MusicMath.GetToneName（C4=60）；base64pitches = int12 音分数组（Base64.Base64EncodeInt12，带 `#次数#` 游程压缩）。
+// resampler.mjs — 重采样器命令行契约调用（VOCAL-M1/M2）。
+// 两种契约变体（contract 配置选择，默认 classic）：
+//   classic  — 经典 UTAU 契约（worldline.exe 等独立重采样器）：
+//              <input> <output> <音名> <velocity> <flags> <offset> <durRequired> <fixed/consonant> <end_blank/cutoff> <volume> <modulation> [<pitch bend>]
+//              无 tempo 段；音高弯曲为可选末参，平直音高省略（worldline 内置 f0 分析，不需要 frq）。
+//   openutau — OpenUtau/moresampler 扩展契约（对齐 ExeResampler.cs，2026-10-06 核对）：
+//              同前 11 参 + `!tempo` + base64pitches(int12)。
 // resampler 配置：exe 路径字符串，或 argv 头数组（["node","stub.mjs"]，包装脚本/测试用）。
 // 坑位备忘：.bat/.cmd 不能被 execFile 直接执行，请用 exe 或 argv 头数组包一层。
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { toneToName } from './ustx.mjs';
 
-const PITCH_CADENCE_MS = 5; // 音高数组采样密度（与 OpenUtau 渲染粒度一致的近似，M2 精确对齐）
+const PITCH_CADENCE_MS = 5; // 音高数组采样密度（与 OpenUtau 渲染粒度一致的近似，M3 精确对齐）
+
+export const RESAMPLER_CONTRACTS = ['classic', 'openutau'];
 
 /** Base64.Base64EncodeInt12 的 Node 实现：12-bit 有符号 → 两个 base64 字符 + `#次数#` 游程压缩。 */
 export function encodePitchesInt12(pitches) {
@@ -34,19 +39,14 @@ export function encodePitchesInt12(pitches) {
   return out;
 }
 
-/** 平直音高 → 全 0 音分数组（M1 无音高曲线渲染时的近似；pitchCurve 支持属 M2）。 */
+/** 平直音高 → 全 0 音分数组（M1 无音高曲线渲染时的近似；pitchCurve 支持属 M3）。 */
 export function flatPitches(durationMs, cadenceMs = PITCH_CADENCE_MS) {
   return new Array(Math.max(1, Math.ceil(durationMs / cadenceMs) + 1)).fill(0);
 }
 
-/**
- * 按契约调用一次重采样器。
- * item: { resampler, inputWav, outputWav, tone, velocity=100, flags='', offsetMs=0,
- *         durationMs=0, consonantMs=0, cutoffMs=0, volume=100, modulation=0, tempo=120, pitches=[] }
- * 输出文件不存在视为失败（契约要求重采样器写出文件）。
- */
-export function callResampler(item, { timeoutMs = 120_000 } = {}) {
-  const args = [
+/** 按契约组装参数（classic=11 参，openutau=13 参带 !tempo 与 base64 音高）。 */
+export function buildResamplerArgs(item) {
+  const base = [
     item.inputWav,
     item.outputWav,
     item.tone < 0 ? '' : toneToName(item.tone),
@@ -58,9 +58,24 @@ export function callResampler(item, { timeoutMs = 120_000 } = {}) {
     String(Math.round(item.cutoffMs ?? 0)),
     String(Math.round(item.volume ?? 100)),
     String(Math.round(item.modulation ?? 0)),
-    `!${item.tempo ?? 120}`,
-    encodePitchesInt12(item.pitches ?? []),
   ];
+  if ((item.contract ?? 'classic') === 'openutau') {
+    return [...base, `!${item.tempo ?? 120}`, encodePitchesInt12(item.pitches ?? [])];
+  }
+  const pitches = item.pitches ?? [];
+  const hasBend = pitches.length > 0 && pitches.some((p) => p !== 0);
+  return hasBend ? [...base, encodePitchesInt12(pitches)] : base;
+}
+
+/**
+ * 按契约调用一次重采样器。
+ * item: { resampler, inputWav, outputWav, tone, velocity=100, flags='', offsetMs=0,
+ *         durationMs=0, consonantMs=0, cutoffMs=0, volume=100, modulation=0, tempo=120,
+ *         pitches=[], contract='classic' }
+ * 输出文件不存在视为失败（契约要求重采样器写出文件）。
+ */
+export function callResampler(item, { timeoutMs = 120_000 } = {}) {
+  const args = buildResamplerArgs(item);
   const argvHead = Array.isArray(item.resampler) ? item.resampler : [item.resampler];
   return new Promise((resolve, reject) => {
     execFile(argvHead[0], [...argvHead.slice(1), ...args], { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {

@@ -82,6 +82,8 @@ test('坏 JSON / 顶层非对象：报错并指出文件路径', () => {
 
 test('卫生检查：src/vocal 全目录零硬编码盘符路径、零本机用户目录', () => {
   // VOCAL-M1 验收硬指标：任何一层都可配置，代码里不允许出现机器本地路径。
+  // 先剥掉正则字面量再扫：否则 `encoding:\s*` 这类正则源码会伪装成 "g:\s" 盘符路径造成误报。
+  const stripRegexLiterals = (text) => text.replace(/\/(?:[^/\n\\]|\\.)+\/[gimsuy]*/g, ' ');
   const moduleDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'src', 'vocal');
   const offenders = [];
   const scan = (dir) => {
@@ -89,7 +91,7 @@ test('卫生检查：src/vocal 全目录零硬编码盘符路径、零本机用�
       const full = join(dir, name);
       if (statSync(full).isDirectory()) { scan(full); continue; }
       if (!/\.(mjs|ts|json)$/.test(name)) continue;
-      const text = readFileSync(full, 'utf8');
+      const text = stripRegexLiterals(readFileSync(full, 'utf8'));
       if (/[A-Za-z]:[\\/]/.test(text)) offenders.push(`${name}: 盘符路径（转义与否都算）`);
       if (/Users[\\/]Martis|home[\\/]martis/.test(text)) offenders.push(`${name}: 本机用户目录`);
       if (/F:\\aicg|F:\/aicg/.test(text)) offenders.push(`${name}: 本机工作区路径`);
@@ -97,6 +99,21 @@ test('卫生检查：src/vocal 全目录零硬编码盘符路径、零本机用�
   };
   scan(moduleDir);
   assert.deepEqual(offenders, []);
+});
+
+test('resamplerContract：env 可配，非法值明确报错', () => {
+  const withEnv = resolveConfig({
+    projectRoot: join(work, 'no-proj3'), homedirOverride: join(work, 'no-home2'),
+    envOverride: { [CONFIG_ENV_KEYS.resamplerContract]: 'openutau' },
+  });
+  assert.equal(withEnv.sources.resamplerContract.value, 'openutau');
+  assert.throws(
+    () => resolveConfig({
+      projectRoot: join(work, 'no-proj4'), homedirOverride: join(work, 'no-home3'),
+      envOverride: { [CONFIG_ENV_KEYS.resamplerContract]: 'bogus' },
+    }),
+    /classic 或 openutau/,
+  );
 });
 
 test('configExample：示例里的路径是占位符而非真实路径', () => {

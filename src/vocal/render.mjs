@@ -1,27 +1,55 @@
-// render.mjs — M1 无头渲染编排：USTX + 声库 + 重采样器 → 人声 WAV（VOCAL-M1）。
-// 流程：结构自检 → 逐音符 oto 别名查找 → 按契约调用重采样器 → 重叠相加 → mono16 WAV。
-// M1 边界（完整 ResamplerItem 语义与渲染缓存属 M2，呼应改进建议 B2 的缓存键设计）：
-//   durRequired ≈ 音符时长 + overlap；音高曲线固定为平直（zeros）；包络为线性交叠；
-//   仅支持单 voice_part；Lyric=R 视为休止跳过；lyric 必须是 oto 别名本身（CV 用法）。
-import { mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+// render.mjs — M2 无头渲染编排：USTX + 声库 + 重采样器 → 人声 WAV（VOCAL-M2）。
+// 流程：结构自检 → 逐音符 oto 别名查找 → 按契约调用重采样器（内容寻址缓存）→ 重叠相加 → mono16 WAV。
+// 时长公式对齐 OpenUtau ResamplerItem.cs（2026-10-06 核对）：
+//   durRequired = max(音符时长, consonant) 向上取整到 50ms 网格；
+//   M2 简化布局（leading=preutter、无 tail 侵入）下 skipOver 与 durCorrection 为 0，
+//   完整音素布局（TailIntrude/TailOverlap）与包络精修属 M3。
+// 缓存（改进建议 B2）：按「重采样器 argv 头 + 输入 wav 内容哈希 + 契约参数」寻址，
+//   同参数音符跨渲染直接复用，改动一个音符不再全片重算。
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { parseYaml } from './yaml-lite.mjs';
 import { TICKS_PER_BEAT, UstxError, validateUstxText } from './ustx.mjs';
 import { loadVoicebank } from './oto.mjs';
-import { callResampler, flatPitches } from './resampler.mjs';
+import { buildResamplerArgs, callResampler, flatPitches } from './resampler.mjs';
 import { readWav, resampleLinear, writeWavMono16, WAV_SAMPLE_RATE } from './wav.mjs';
 import { concatenate } from './wavtool.mjs';
 
 const fail = (message) => { throw new UstxError(message); };
 const msToSamples = (ms) => Math.round(ms * WAV_SAMPLE_RATE / 1000);
 
+/** 单音符渲染：有 cacheDir 时按内容哈希寻址复用（对齐 OpenUtau 的 res-<hash>.wav 方案）。 */
+async function renderNote({ item, argvHead, cacheDir, noteWavPath, timeoutMs, log }) {
+  if (!cacheDir) {
+    await callResampler(item, { timeoutMs });
+    return false;
+  }
+  const inputHash = createHash('sha256').update(readFileSync(item.inputWav)).digest('hex').slice(0, 16);
+  const key = createHash('sha256')
+    .update(JSON.stringify([argvHead, inputHash, buildResamplerArgs({ ...item, outputWav: '' }).slice(2)]))
+    .digest('hex').slice(0, 32);
+  const cachePath = join(cacheDir, `res-${key}.wav`);
+  if (existsSync(cachePath)) {
+    copyFileSync(cachePath, noteWavPath);
+    log(`  缓存命中 ${basename(cachePath)}`);
+    return true;
+  }
+  await callResampler(item, { timeoutMs });
+  mkdirSync(cacheDir, { recursive: true });
+  copyFileSync(noteWavPath, cachePath);
+  return false;
+}
+
 /**
  * 渲染一个 USTX。
- * 参数：{ ustxText, resampler, outWav, voicebankDir | voicebank, workDir, timeoutMs?, log? }
+ * 参数：{ ustxText, resampler, outWav, voicebankDir | voicebank, workDir, contract?, cacheDir?, timeoutMs?, log? }
  * voicebank 可传已加载对象（测试复用）或目录（内部加载）。
- * 返回 { outWav, noteCount, skippedCount, tempo, durationSamples, warnings }。
+ * contract: 'classic'（worldline.exe 等，默认）| 'openutau'（moresampler 等）。
+ * cacheDir 给定时启用逐音符内容寻址缓存。
+ * 返回 { outWav, noteCount, skippedCount, tempo, durationSamples, warnings, bank, cacheSummary }。
  */
-export async function renderUstx({ ustxText, resampler, outWav, voicebankDir, voicebank, workDir, timeoutMs, log = () => {} }) {
+export async function renderUstx({ ustxText, resampler, outWav, voicebankDir, voicebank, workDir, contract = 'classic', cacheDir, timeoutMs, log = () => {} }) {
   if (!resampler) fail('缺少重采样器配置（resampler）——任何实现 UTAU/OpenUtau 命令行契约的 exe 或 argv 数组');
   if (!outWav) fail('缺少输出路径（outWav）');
   if (!workDir) fail('缺少工作目录（workDir，存放逐音符中间 WAV）');
@@ -48,6 +76,8 @@ export async function renderUstx({ ustxText, resampler, outWav, voicebankDir, vo
   const warnings = [...bank.warnings];
   let noteCount = 0;
   let skippedCount = 0;
+  let cacheHits = 0;
+  let cacheMisses = 0;
   let warnedNegative = false;
 
   for (const [index, note] of notes.entries()) {
@@ -64,11 +94,14 @@ export async function renderUstx({ ustxText, resampler, outWav, voicebankDir, vo
     const durationMs = note.duration * msPerTick;
     const overlapMs = Math.max(0, entry.overlap);
     const preutterMs = entry.preutter;
-    const durRequiredMs = durationMs + overlapMs + 10;
+    // ResamplerItem.cs 公式：max(时长, consonant) 后向上取整到 50ms 网格；
+    // M2 简化布局下 skipOver 与 durCorrection 为 0（见文件头说明）。
+    let durRequiredMs = Math.max(durationMs, entry.consonant);
+    durRequiredMs = Math.ceil(durRequiredMs / 50 + 0.5) * 50;
 
     const noteWavPath = join(workDir, `note-${String(index).padStart(4, '0')}.wav`);
     log(`[${index}] ${lyric} tone=${note.tone} dur=${Math.round(durationMs)}ms → ${entry.file} (offset=${entry.offset} consonant=${entry.consonant} cutoff=${entry.cutoff})`);
-    await callResampler({
+    const item = {
       resampler,
       inputWav: wav,
       outputWav: noteWavPath,
@@ -83,7 +116,11 @@ export async function renderUstx({ ustxText, resampler, outWav, voicebankDir, vo
       modulation: 0,
       tempo,
       pitches: flatPitches(durRequiredMs),
-    }, { timeoutMs });
+      contract,
+    };
+    const argvHead = Array.isArray(resampler) ? resampler : [resampler];
+    const hit = await renderNote({ item, argvHead, cacheDir, noteWavPath, timeoutMs, log });
+    if (hit) cacheHits++; else cacheMisses++;
 
     const rendered = readWav(noteWavPath);
     const samples = rendered.sampleRate === WAV_SAMPLE_RATE
@@ -116,5 +153,6 @@ export async function renderUstx({ ustxText, resampler, outWav, voicebankDir, vo
     durationSamples: mixed.length,
     warnings,
     bank: { name: bank.name, aliases: bank.entries.length },
+    cacheSummary: { hits: cacheHits, misses: cacheMisses },
   };
 }

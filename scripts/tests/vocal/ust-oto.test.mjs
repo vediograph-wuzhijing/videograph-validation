@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildUstx, serializeUstx } from '../../../src/vocal/ustx.mjs';
 import { ustxTextToUst, ustxToUst } from '../../../src/vocal/ust.mjs';
-import { parseOto, findOtoFiles, loadVoicebank } from '../../../src/vocal/oto.mjs';
+import { parseOto, findOtoFiles, loadVoicebank, declaredEncoding, decodeBankText } from '../../../src/vocal/oto.mjs';
 
 const work = mkdtempSync(join(tmpdir(), 'videograph-vocal-oto-'));
 after(() => rmSync(work, { recursive: true, force: true }));
@@ -46,19 +46,19 @@ test('USTX → UST：多 part 与空 part 明确拒绝', () => {
   assert.throws(() => ustxToUst({}), /voice_parts/);
 });
 
-test('parseOto：标准行、省略字段、坏行容错', () => {
+test('parseOto：标准行（wav=别名,5 数）、省略字段与别名、坏行容错', () => {
   const oto = parseOto([
-    'あ = a.wav,100,300,200,-100,50,30',
-    'い=i.wav,0,0,0',
+    'a.wav=あ,100,300,-100,50,30',
+    'i.wav=い,0,0,0',
     'bad line without equals',
-    'う=u.wav',
+    'u.wav=,10',          // 别名空 → 取文件名去扩展名
     '# 注释行',
     '',
   ].join('\n'));
   assert.deepEqual(oto, [
-    { alias: 'あ', file: 'a.wav', offset: 100, consonant: 300, blank: 200, cutoff: -100, preutter: 50, overlap: 30 },
-    { alias: 'い', file: 'i.wav', offset: 0, consonant: 0, blank: 0, cutoff: 0, preutter: 0, overlap: 0 },
-    { alias: 'う', file: 'u.wav', offset: 0, consonant: 0, blank: 0, cutoff: 0, preutter: 0, overlap: 0 },
+    { file: 'a.wav', alias: 'あ', offset: 100, consonant: 300, cutoff: -100, preutter: 50, overlap: 30 },
+    { file: 'i.wav', alias: 'い', offset: 0, consonant: 0, cutoff: 0, preutter: 0, overlap: 0 },
+    { file: 'u.wav', alias: 'u', offset: 10, consonant: 0, cutoff: 0, preutter: 0, overlap: 0 },
   ]);
 });
 
@@ -66,8 +66,8 @@ test('loadVoicebank：多级 oto 扫描、别名字典、重复告警、findAlia
   const bankDir = join(work, 'bank');
   mkdirSync(join(bankDir, 'sub'), { recursive: true });
   writeFileSync(join(bankDir, 'character.txt'), 'name=テスト音源\nimage=bitmap.bmp\n', 'utf8');
-  writeFileSync(join(bankDir, 'oto.ini'), 'あ = a.wav,100,300,200,-100,50,30\n', 'utf8');
-  writeFileSync(join(bankDir, 'sub', 'oto.ini'), 'あ=dup.wav\nい=i.wav\n', 'utf8');
+  writeFileSync(join(bankDir, 'oto.ini'), 'a.wav=あ,100,300,-100,50,30\n', 'utf8');
+  writeFileSync(join(bankDir, 'sub', 'oto.ini'), 'dup.wav=あ\ni.wav=い\n', 'utf8');
 
   const bank = loadVoicebank(bankDir);
   assert.equal(bank.name, 'テスト音源');
@@ -97,4 +97,31 @@ test('findOtoFiles：隐藏目录跳过、深度防御', () => {
   const found = findOtoFiles(root);
   assert.equal(found.length, 1);
   assert.equal(found[0].dir, join(root, 'sub'));
+});
+
+test('Shift-JIS 声库：character.yaml 声明编码生效，别名不乱码', () => {
+  const bankDir = join(work, 'sjis-bank');
+  mkdirSync(bankDir, { recursive: true });
+  // 手工构造 Shift-JIS 字节：あ=82A0 い=82A2 ん=82F1（别名在 `=` 右侧）
+  const sjis = (bytes) => Buffer.from(bytes);
+  writeFileSync(join(bankDir, 'oto.ini'), Buffer.concat([
+    Buffer.from('a.wav='), sjis([0x82, 0xa0]), Buffer.from(',100,50,-80,40,20\r\n'),
+    Buffer.from('i.wav='), sjis([0x82, 0xa2]), Buffer.from(',90,40,-70,30,15\r\n'),
+    Buffer.from('n.wav='), sjis([0x82, 0xf1]), Buffer.from('\r\n'),
+  ]));
+  writeFileSync(join(bankDir, 'character.yaml'), 'name: SJIS音源\ntext_file_encoding: shift-jis\n', 'utf8');
+
+  assert.equal(declaredEncoding(bankDir), 'shift-jis');
+  const bank = loadVoicebank(bankDir);
+  assert.equal(bank.name, 'SJIS音源');
+  assert.deepEqual([...bank.byAlias.keys()].sort(), ['い', 'ん', 'あ'].sort());
+  assert.ok(bank.byAlias.has('あ'));
+  assert.equal(bank.byAlias.get('あ').offset, 100);
+});
+
+test('decodeBankText：无声明时 UTF-8 严格解码失败自动退 Shift-JIS', () => {
+  const sjisKana = Buffer.from([0x82, 0xa0]); // あ
+  assert.equal(decodeBankText(sjisKana, null), 'あ');
+  assert.equal(decodeBankText(sjisKana, 'shift-jis'), 'あ');
+  assert.equal(decodeBankText(Buffer.from('あ', 'utf8'), null), 'あ');
 });

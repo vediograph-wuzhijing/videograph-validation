@@ -15,6 +15,8 @@ export const CONFIG_ENV_KEYS = {
   openutauHome: 'VIDEOGRAPH_OPENUTAU_HOME',     // OpenUtau 安装根目录（含 OpenUtau.exe）
   resampler: 'VIDEOGRAPH_OPENUTAU_RESAMPLER',   // 重采样器可执行文件路径，或 argv 头数组（包装脚本/测试桩）
   voicebankDir: 'VIDEOGRAPH_VOICEBANK_DIR',     // 默认声库目录（单个声库根）
+  resamplerContract: 'VIDEOGRAPH_OPENUTAU_CONTRACT', // classic（worldline.exe 等）| openutau（moresampler 等）
+  cacheDir: 'VIDEOGRAPH_VOCAL_CACHE',           // 逐音符渲染缓存目录（内容寻址，B2）
 };
 
 // 平台标准安装位置候选（自动发现兜底，全部可被环境变量/配置文件覆盖）。
@@ -123,6 +125,14 @@ export function resolveConfig(options = {}) {
   const homeHit = explicitHome ?? pick('openutauHome', null);
   const resamplerHit = explicitResampler ?? pick('resampler', null);
   const bankHit = explicitBank ?? pick('voicebankDir', null);
+  const contractHit = firstDefined(
+    options.resamplerContract !== undefined ? [options.resamplerContract, 'options'] : null,
+    environ[CONFIG_ENV_KEYS.resamplerContract] ? [environ[CONFIG_ENV_KEYS.resamplerContract], `env:${CONFIG_ENV_KEYS.resamplerContract}`] : null,
+    fileConfig && fileConfig.data.resamplerContract !== undefined ? [fileConfig.data.resamplerContract, `file:${fileConfig.path}`] : null,
+  );
+  if (contractHit && !['classic', 'openutau'].includes(String(contractHit.value))) {
+    fail(`resamplerContract 只能是 classic 或 openutau，实际: ${contractHit.value}`);
+  }
 
   if (homeHit) {
     sources.openutauHome = { value: homeHit.value, source: homeHit.source };
@@ -156,6 +166,19 @@ export function resolveConfig(options = {}) {
     checks.push({ item: 'voicebankDir', ok: true, detail: `${bankHit.value}（来源 ${bankHit.source}）` });
   } else {
     checks.push({ item: 'voicebankDir', ok: false, detail: `未配置声库目录（${CONFIG_ENV_KEYS.voicebankDir} 或配置文件 voicebankDir 键）` });
+  }
+  if (contractHit) {
+    sources.resamplerContract = { value: String(contractHit.value), source: contractHit.source };
+    checks.push({ item: 'resamplerContract', ok: true, detail: `${contractHit.value}（来源 ${contractHit.source}）` });
+  }
+  const cacheHit = firstDefined(
+    options.cacheDir !== undefined ? [options.cacheDir, 'options'] : null,
+    environ[CONFIG_ENV_KEYS.cacheDir] ? [environ[CONFIG_ENV_KEYS.cacheDir], `env:${CONFIG_ENV_KEYS.cacheDir}`] : null,
+    fileConfig && fileConfig.data.cacheDir !== undefined ? [fileConfig.data.cacheDir, `file:${fileConfig.path}`] : null,
+  );
+  if (cacheHit) {
+    sources.cacheDir = { value: cacheHit.value, source: cacheHit.source };
+    checks.push({ item: 'cacheDir', ok: true, detail: `${cacheHit.value}（来源 ${cacheHit.source}）` });
   }
 
   const missing = [];

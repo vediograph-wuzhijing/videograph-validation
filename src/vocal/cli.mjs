@@ -9,7 +9,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve, isAbsolute } from 'node:path';
 import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { resolveConfig, configExample } from './config.mjs';
 import { buildUstx, serializeUstx, validateUstxText, UstxError } from './ustx.mjs';
 import { ustxTextToUst } from './ust.mjs';
@@ -152,6 +152,7 @@ try {
         openutauHome: typeof args['openutau-home'] === 'string' ? args['openutau-home'] : undefined,
         resampler: args.resampler !== undefined ? resolveResamplerOption(args.resampler) : undefined,
         voicebankDir: typeof args.bank === 'string' ? args.bank : undefined,
+        resamplerContract: typeof args['resampler-contract'] === 'string' ? args['resampler-contract'] : undefined,
       });
       const missingRender = config.missing.filter((k) => k !== 'openutauHome'); // 渲染不依赖 OpenUtau 本体
       if (missingRender.length > 0) {
@@ -167,6 +168,8 @@ try {
         outWav: outPath,
         voicebankDir: config.sources.voicebankDir.value,
         workDir,
+        contract: config.sources.resamplerContract?.value ?? 'classic',
+        cacheDir: args['no-cache'] ? undefined : (config.sources.cacheDir?.value ?? join(homedir(), '.videograph', 'vocal-cache')),
         log: args.json ? undefined : (line) => console.log(line),
       });
       out({ ok: true, ...result }, `✔ ${outPath}（${result.noteCount} 音符，${result.bank.name}，${Math.round(result.durationSamples / 44100 * 1000)}ms）`);

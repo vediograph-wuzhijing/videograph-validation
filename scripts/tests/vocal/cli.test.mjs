@@ -69,7 +69,8 @@ const planPath = join(work, 'plan.json');
 writeFileSync(planPath, JSON.stringify(plan), 'utf8');
 
 test('check --json：无配置时退出码 2，报告缺项与配置示例，且不泄露真实路径', async () => {
-  const { code, stdout } = await run(['check', '--json']);
+  // USERPROFILE 指向空目录：隔离本机真实的 ~/.videograph/vocal.json
+  const { code, stdout } = await run(['check', '--json'], { USERPROFILE: join(work, 'empty-home') });
   assert.equal(code, 2);
   const report = JSON.parse(stdout);
   assert.equal(report.ok, false);
@@ -107,7 +108,7 @@ test('render：--resampler argv 数组 + --bank 走通，退出码 0', async () 
   writeWavMono16(join(bankDir, 'a.wav'), tone);
   writeWavMono16(join(bankDir, 'i.wav'), tone);
   writeFileSync(join(bankDir, 'character.txt'), 'name=CLI 音源\n', 'utf8');
-  writeFileSync(join(bankDir, 'oto.ini'), 'あ=a.wav,100,300,200,-100,50,30\nい=i.wav,100,300,200,-100,50,30\n', 'utf8');
+  writeFileSync(join(bankDir, 'oto.ini'), 'a.wav=あ,100,300,-100,50,30\ni.wav=い,100,300,-100,50,30\n', 'utf8');
 
   const ustxPath = join(work, 'song.ustx');
   await run(['make-ustx', '--plan', planPath, '--out', ustxPath]);
@@ -128,7 +129,8 @@ test('render：--resampler argv 数组 + --bank 走通，退出码 0', async () 
 
 test('render：缺配置退出码 2；未知命令退出码 3', async () => {
   const ustxPath = join(work, 'song.ustx');
-  const { code, stderr } = await run(['render', '--ustx', ustxPath, '--out', join(work, 'x.wav'), '--json']);
+  const { code, stderr } = await run(['render', '--ustx', ustxPath, '--out', join(work, 'x.wav'), '--json'],
+    { USERPROFILE: join(work, 'empty-home') });
   assert.equal(code, 2);
   assert.match(stderr, /配置缺失/);
   const unknown = await run(['nope']);

@@ -2,11 +2,12 @@
 // 假重采样器按 13 参契约写 WAV 并旁路记录参数，测试断言契约形状；全部离线、全部临时目录。
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { buildUstx, serializeUstx, STANDARD_EXPRESSIONS } from '../../../src/vocal/ustx.mjs';
 import { emitYaml } from '../../../src/vocal/yaml-lite.mjs';
+import { buildResamplerArgs } from '../../../src/vocal/resampler.mjs';
 import { loadVoicebank } from '../../../src/vocal/oto.mjs';
 import { renderUstx } from '../../../src/vocal/render.mjs';
 import { writeWavMono16, readWav } from '../../../src/vocal/wav.mjs';
@@ -32,7 +33,7 @@ for (let i = 0; i < frames; i++) buf.writeInt16LE(Math.round(Math.sin(2 * Math.P
 writeFileSync(output, buf);
 writeFileSync(output + '.args.json', JSON.stringify({
   input, output, toneName, velocity, flags, offset, duration, consonant, cutoff, volume, modulation,
-  tempoMark, pitches, pitchesLen: pitches.length,
+  tempoMark, pitches, pitchesLen: pitches?.length ?? 0,
 }));
 `, 'utf8');
 
@@ -42,7 +43,7 @@ function makeBank() {
   writeWavMono16(join(bankDir, 'a.wav'), sine(0.4, 220));
   writeWavMono16(join(bankDir, 'i.wav'), sine(0.4, 330));
   writeFileSync(join(bankDir, 'character.txt'), 'name=テスト音源\n', 'utf8');
-  writeFileSync(join(bankDir, 'oto.ini'), 'あ=a.wav,100,300,200,-100,50,30\nい=i.wav,80,250,150,-80,40,20\n', 'utf8');
+  writeFileSync(join(bankDir, 'oto.ini'), 'a.wav=あ,100,300,-100,50,30\ni.wav=い,80,250,-80,40,20\n', 'utf8');
   return bankDir;
 }
 
@@ -99,6 +100,23 @@ test('encodePitchesInt12：游程压缩 + 解码往返（含负数回绕与极�
   assert.equal(encodePitchesInt12([]), '');
 });
 
+test('buildResamplerArgs：classic 11 参 / openutau 13 参（!tempo + base64 音高）', () => {
+  const item = {
+    inputWav: 'in.wav', outputWav: 'out.wav', tone: 60, velocity: 100, flags: '',
+    offsetMs: 10, durationMs: 290, consonantMs: 30, cutoffMs: -80, volume: 100,
+    modulation: 0, tempo: 120, pitches: [0, 0, 0], contract: 'classic',
+  };
+  const classic = buildResamplerArgs(item);
+  assert.equal(classic.length, 11);
+  assert.equal(classic[2], 'C4');
+  assert.equal(classic[6], '290');
+  assert.equal(classic[8], '-80');
+  const openutau = buildResamplerArgs({ ...item, contract: 'openutau' });
+  assert.equal(openutau.length, 13);
+  assert.equal(openutau[11], '!120');
+  assert.equal(openutau[12], encodePitchesInt12([0, 0, 0]));
+});
+
 test('端到端：假重采样器契约形状与产物时长', async () => {
   const bankDir = makeBank();
   const bank = loadVoicebank(bankDir);
@@ -120,25 +138,53 @@ test('端到端：假重采样器契约形状与产物时长', async () => {
   assert.equal(call1.toneName, 'C4');
   assert.equal(call1.velocity, '100');
   assert.equal(call1.offset, '100');
-  assert.equal(call1.duration, '290');
+  assert.equal(call1.duration, '350'); // durRequired = max(250, consonant 300) → 50ms 网格取整 350
   assert.equal(call1.consonant, '300');
   assert.equal(call1.cutoff, '-100');
   assert.equal(call1.volume, '100');
-  assert.equal(call1.tempoMark, '!120');
-  const expectedPitches = encodePitchesInt12(new Array(Math.ceil(290 / 5) + 1).fill(0)); // 平直音高 → 全 0 + 游程压缩
-  assert.equal(call1.pitches, expectedPitches);
-  assert.equal(call1.pitchesLen, expectedPitches.length);
+  assert.equal(call1.tempoMark, undefined); // classic 契约（默认）：没有 tempo 段
+  assert.equal(call1.pitchesLen, 0);        // 平直音高省略音高弯曲参（桩对缺参记 0）
   assert.ok(call1.input.endsWith('a.wav'));
 
-  // 产物：末音符起点 = 1.25拍*500 - preutter50 = 575ms，durRequired = 500+30+10 = 540ms → ≈1115ms
+  // 产物：末音符起点 = 1.25拍*500 - preutter50 = 575ms；durRequired = max(500,300) → 网格取整 550ms
   const wav = readWav(outWav);
   assert.equal(wav.sampleRate, 44100);
   assert.equal(wav.channels, 1);
-  const expected = Math.round((575 + 540) * 44100 / 1000);
+  const expected = Math.round(1125 * 44100 / 1000);
   assert.ok(Math.abs(wav.samples.length - expected) < expected * 0.02, `时长 ${wav.samples.length} ≈ ${expected}`);
   // 有真实音频内容（正弦），不是全静音
   const peak = wav.samples.reduce((m, v) => Math.max(m, Math.abs(v)), 0);
   assert.ok(peak > 0.1, `峰值 ${peak} > 0.1`);
+});
+
+test('渲染缓存：同参数第二次渲染全部命中，不再调用重采样器', async () => {
+  const bank = loadVoicebank(makeBank());
+  const ustxText = serializeUstx(buildUstx(plan));
+  const cacheDir = join(work, 'note-cache');
+  const first = await renderUstx({
+    ustxText, resampler: ['node', stubPath], outWav: join(work, 'cache1.wav'),
+    voicebank: bank, workDir: join(work, 'cwork1'), cacheDir,
+  });
+  assert.deepEqual(first.cacheSummary, { hits: 0, misses: 3 });
+  const cachedFiles = readdirSync(cacheDir).filter((f) => f.startsWith('res-'));
+  assert.equal(cachedFiles.length, 3);
+  const second = await renderUstx({
+    ustxText, resampler: ['node', stubPath], outWav: join(work, 'cache2.wav'),
+    voicebank: bank, workDir: join(work, 'cwork2'), cacheDir,
+  });
+  assert.deepEqual(second.cacheSummary, { hits: 3, misses: 0 });
+  // 两次产物逐字节一致（缓存复用不改变结果）
+  assert.deepEqual(
+    readFileSync(join(work, 'cache1.wav')),
+    readFileSync(join(work, 'cache2.wav')),
+  );
+  // 换 tempo 改变 !tempo/音高采样参数 → openutau 契约下会换键；classic 下 tempo 不入参，仍命中
+  const higherTempo = serializeUstx(buildUstx({ ...plan, tempo: 121 }));
+  const third = await renderUstx({
+    ustxText: higherTempo, resampler: ['node', stubPath], outWav: join(work, 'cache3.wav'),
+    voicebank: bank, workDir: join(work, 'cwork3'), cacheDir,
+  });
+  assert.deepEqual(third.cacheSummary, { hits: 3, misses: 0 }); // classic 契约无 tempo 段，键不变
 });
 
 test('端到端：未知别名给出可操作报错（含别名样例）', async () => {

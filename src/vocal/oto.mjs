@@ -1,20 +1,51 @@
-// oto.mjs — UTAU 声库的 oto.ini 解析与声库扫描（VOCAL-M1）。
-// oto 行格式：`别名=文件名.wav,offset,consonant,blank,cutoff,preutter,overlap`（数值均可省略，默认 0）。
-// offset/consonant/cutoff 与重采样器契约直接对应；preutter/overlap 决定 wavtool 的放置与交叠。
+// oto.mjs — UTAU 声库的 oto.ini 解析与声库扫描（VOCAL-M1/M2）。
+// 行格式（OpenUtau 与 UTAU 通用，2026-10-06 对 VoicebankLoader.cs 与 oto 格式文档核对）：
+//   `<文件名>.wav=<别名>,<offset>,<consonant>,<cutoff>,<preutter>,<overlap>`（数值均可省略，默认 0；
+//   别名省略时取文件名去扩展名；没有 `=` 的行跳过）。offset/consonant/cutoff 与重采样器契约直接对应；
+//   preutter/overlap 决定 wavtool 的放置与交叠。
+// 编码：character.yaml 的 text_file_encoding 声明 → oto.ini 头部 `#Charset:` 声明 →
+//   UTF-8 严格解码失败退 Shift-JIS（老声库惯例）。
 import { readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, basename, relative } from 'node:path';
 import { UstxError } from './ustx.mjs';
 
 const fail = (message) => { throw new UstxError(message); };
 
-const num = (value, label) => {
-  if (value === undefined || value.trim() === '') return 0;
-  const n = Number(value);
-  if (!Number.isFinite(n)) fail(`oto 数值非法（${label}）: ${value}`);
-  return n;
-};
+/** 读 character.yaml（OpenUtau 规范：YAML 本身是 UTF-8，可带 BOM），取 text_file_encoding 声明。 */
+export function declaredEncoding(bankDir) {
+  const yamlPath = join(bankDir, 'character.yaml');
+  if (!existsSync(yamlPath)) return null;
+  try {
+    const text = new TextDecoder('utf-8').decode(readFileSync(yamlPath)).replace(/^\uFEFF/, '');
+    const m = /^\s*text_file_encoding:\s*['"]?([\w.-]+)/m.exec(text);
+    return m ? m[1].trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
 
-/** 解析一段 oto.ini 文本 → [{ alias, file, offset, consonant, blank, cutoff, preutter, overlap }]。 */
+/** 按声明解码；无声明时先看文件头 `#Charset:`（OpenUtau 惯例，前 10 行内），再 UTF-8 严格解码，失败退 Shift-JIS。 */
+export function decodeBankText(buffer, declared) {
+  if (!declared) {
+    const head = buffer.subarray(0, 512).toString('latin1');
+    const m = /^\s*#\s*Charset:\s*([\w-]+)/im.exec(head);
+    if (m) declared = m[1].trim().toLowerCase();
+  }
+  if (declared) {
+    try { return new TextDecoder(declared).decode(buffer); } catch { /* 声明错误时退自动探测 */ }
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+  } catch {
+    return new TextDecoder('shift-jis').decode(buffer);
+  }
+}
+
+/**
+ * 解析一段 oto.ini 文本。
+ * 行格式：`<wav>=<alias>,<offset>,<consonant>,<cutoff>,<preutter>,<overlap>`
+ * → [{ file, alias, offset, consonant, cutoff, preutter, overlap }]；没有 `=` 的坏行跳过。
+ */
 export function parseOto(text) {
   const entries = [];
   for (const rawLine of String(text).split(/\r?\n/)) {
@@ -22,18 +53,23 @@ export function parseOto(text) {
     if (!line || line.startsWith('#')) continue;
     const eq = line.indexOf('=');
     if (eq < 0) continue; // 容错：跳过坏行而非整体失败
-    const alias = line.slice(0, eq).trim();
+    const file = line.slice(0, eq).trim();
     const fields = line.slice(eq + 1).split(',');
-    if (!alias || !fields[0]?.trim()) continue;
+    const alias = (fields[0] ?? '').trim() || file.replace(/\.[^.]+$/, '');
+    if (!file || !alias) continue;
+    const num = (value) => {
+      if (value === undefined || value.trim() === '') return 0;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : 0; // OpenUtau 同款容错：非法数值按 0
+    };
     entries.push({
+      file,
       alias,
-      file: fields[0].trim(),
-      offset: num(fields[1], 'offset'),
-      consonant: num(fields[2], 'consonant'),
-      blank: num(fields[3], 'blank'),
-      cutoff: num(fields[4], 'cutoff'),
-      preutter: num(fields[5], 'preutter'),
-      overlap: num(fields[6], 'overlap'),
+      offset: num(fields[1]),
+      consonant: num(fields[2]),
+      cutoff: num(fields[3]),
+      preutter: num(fields[4]),
+      overlap: num(fields[5]),
     });
   }
   return entries;
@@ -61,12 +97,22 @@ export function findOtoFiles(bankDir) {
   return found;
 }
 
-function readCharacterName(bankDir) {
+function readCharacterName(bankDir, declared) {
+  // OpenUtau 声库优先 character.yaml 的 name（UTF-8、可带 BOM）
+  const yamlPath = join(bankDir, 'character.yaml');
+  if (existsSync(yamlPath)) {
+    try {
+      const text = new TextDecoder('utf-8').decode(readFileSync(yamlPath)).replace(/^\uFEFF/, '');
+      const m = /^\s*name:\s*(.+)$/m.exec(text);
+      if (m && m[1].trim()) return m[1].trim().replace(/^['"]|['"]$/g, '');
+    } catch { /* 继续读 character.txt */ }
+  }
   for (const name of ['character.txt', 'character_utf8.txt']) {
     const full = join(bankDir, name);
     if (!existsSync(full)) continue;
     try {
-      for (const line of readFileSync(full, 'utf8').split(/\r?\n/)) {
+      const text = decodeBankText(readFileSync(full), declared);
+      for (const line of text.split(/\r?\n/)) {
         const m = /^name\s*=\s*(.+)$/.exec(line.trim());
         if (m) return m[1].trim();
       }
@@ -90,10 +136,11 @@ export function loadVoicebank(bankDir) {
   const entries = [];
   const warnings = [];
   const byAlias = new Map();
+  const declared = declaredEncoding(bankDir);
   for (const { dir, oto } of otoFiles) {
     let parsed;
     try {
-      parsed = parseOto(readFileSync(oto, 'utf8'));
+      parsed = parseOto(decodeBankText(readFileSync(oto), declared));
     } catch (err) {
       warnings.push(`跳过无法解析的 ${relative(bankDir, oto) || basename(oto)}: ${err.message}`);
       continue;
@@ -110,7 +157,8 @@ export function loadVoicebank(bankDir) {
   }
   return {
     dir: bankDir,
-    name: readCharacterName(bankDir) ?? basename(bankDir),
+    name: readCharacterName(bankDir, declared) ?? basename(bankDir),
+    encoding: declared ?? 'auto(utf8→shift-jis)',
     entries,
     byAlias,
     warnings,
