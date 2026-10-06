@@ -555,6 +555,26 @@ skills/shotcraft/
 - **待人确认（SONG-02 界面接线后操作）**：① 转写有误听（古风唱词，如「一封情意是花」等句需人校对）；② bpm 169.45 偏高（琵琶轮指密集），需人耳校验或在校正界面 tap tempo；③ 段落只有 4 段且无标签（unknown），需人命名。
 - 回归：66/66 测试 + build ✓（分段实现在 analyze.py，无 Node 侧改动）。
 
+### VOCAL 冲刺：OpenUTAU 人声合成集成（2026-10-06 规划；M1 由 ZCode 会话认领）
+
+**背景**：使用者改进建议（《VideoGraph改进建议.md》，2026-10-05/06 制作《ループザルーム》PV 的实录）指出：人声目前只能靠外部 TTS 凑合、歌词对齐失败要人工校正一个半小时（A1/A3）。本冲刺把 OpenUTAU/UTAU 生态封装为歌声合成与编辑后端：AI 写音符/歌词/参数 → 无头渲染人声 WAV + 词级时间 → 入工程成为音轨与歌词方案。**生成音符时词级时间天然已知**，对齐从"事后校正"变成"生成即精确"，从源头化解 A1/A3。
+
+**调研结论（2026-10-06，对 openutau/OpenUtau master 源码逐文件核对）**：
+
+- **官方无 CLI/无头渲染**：[issue #1615](https://github.com/openutau/OpenUtau/issues/1615)（closed as not planned）；OpenUtau.Core 与 UI 存在耦合（SynchronizationContext），库内直调 `PlaybackManager.RenderToFiles` 不可靠，故不走"驱动 OpenUtau 本体"路线。
+- **可行路线＝经典渲染契约自研管线**：USTX（YAML、ustx_version 0.10、UnderscoredNamingConvention、加载端 IgnoreUnmatchedProperties）→ 每音符按 OpenUtau `ExeResampler` 同款 13 参命令行契约调用外部重采样器（`input output 音名 velocity flags offset durRequired consonant cutoff volume modulation !tempo base64pitches(int12)`）→ Node 内实现 wavtool（重叠相加＋包络，参考 `SharpWavtool`）。
+- OpenUtau 内置 worldline 是**进程内原生库**（worldline.dll/.so/.dylib），不能当 exe 用；重采样器本体由配置提供（任何实现该契约的 exe，如 moresampler）。M2 评估从其 MIT 许可的 `cpp/worldline` 构建独立 CLI 作为推荐默认。
+- 工程事实（M1 生成器依据）：分辨率固定 480 tick/拍；音高点 `{x 毫秒(相对音符起点), y 0.1半音, shape io|lin|i|o|sp}`；默认滑音 Standard 80/-40ms；颤音默认 period 175/depth 25/in 10/out 10；标准表情 27 项（required: dyn/pitd/clr/eng/vel/vol/atk/dec；缩写含 `mod+`）。
+- **许可边界**：OpenUtau 为 MIT——只引用格式与命令行契约知识、不复制代码；声库与重采样器二进制由使用者提供、不入库、许可各自核对（同 CLAUDE.md 纪律）。
+
+**工作包**：
+
+- **VOCAL-M1 基础层（🚧 本切片）**：新目录 `src/vocal/`——①外部工具解析链（显式参数→环境变量 `VIDEOGRAPH_OPENUTAU_HOME`/`VIDEOGRAPH_OPENUTAU_RESAMPLER`/`VIDEOGRAPH_VOICEBANK_DIR`→`.videograph/vocal.json`（项目级）→`~/.videograph/vocal.json`（用户级）→PATH 查找→平台标准安装位置候选；**代码零硬编码路径**，卫生测试兜底）；②YAML 子集读写器（块式+流式映射，供生成与自检）；③USTX 0.10 生成器（标准表情表、音符/音高/颤音默认值对齐 OpenUtau）与经典 UST 写出；④oto.ini 解析与声库扫描；⑤重采样器契约调用（int12 base64 音高编码、音名转换）＋简单 wavtool（重叠相加）＋端到端 render；⑥CLI：`check`/`make-ustx`/`check-ustx`/`make-ust`/`render`（`--json` 输出、明确退出码、无配置时给可操作指引）。**验收**：`node --test scripts/tests/vocal/…` 全过（离线，假重采样器端到端渲染出合法 WAV）；`check` 在未配置机器上可诊断、可指导；USTX 结构自检通过；不修改共享热点文件。
+- **VOCAL-M2 真机渲染打通（⬜，需使用者备 OpenUTAU/声库/重采样器）**：真实声库端到端；frq 生成（依 `Frq.cs` 格式，或选自带生成的重采样器）；参数对齐 OpenUtau `ResamplerItem`（durRequired/skipOver/包络细节）；互操作双向验证（我们生成的 ustx OpenUtau 能加载、OpenUtau 存的 ustx 我们能渲染）；渲染缓存键（呼应改进建议 B2）。
+- **VOCAL-M3 工程集成（⬜）**：渲染产物（WAV+LRC+词级时间）接入 `project_create_from_audio`/song 分析链路，对齐免校正；人声轨与伴奏分离登记；改进建议 A3 的"实测/推算"标记在此天然成立。
+- **VOCAL-M4 MCP 与审阅室（⬜）**：`mcp-vocal-tools.ts` 注册（同一提交同步 `docs/MCP-GUIDE.md` 并跑 sync-platform）；AI 编辑闭环：改音符/音高/表情 → 重渲 → 审阅室试听对比。
+- **VOCAL-M5 高级能力（⬜）**：CVVC/presamp.ini 自动音素转换、AI 声库（DiffSinger）无头可行性评估、多轨和声、Blender F1 复用同一外部工具解析链。
+
 ### 既有任务清单
 
 1. ⬜ 完成新工程界面集成与构建；节点可选择/导航，工程可刷新恢复，后台任务和产物可见。
@@ -718,6 +738,7 @@ MCP 与 UI 共用命令层。MCP 不是自动调用模型的魔法：未有 agen
 | AE LLM-AE 冲刺 | 🚧 集成者（本会话）2026-10-02 起；AE-P0 ✅ 已运行验证并合并 main（`bdacc13`），AE-P1 起未开始 | `src/server/rhythm.mjs`、`src/server/mcp-ae-tools.ts`、`scripts/tests/ae/`，以及 render-worker/index/mcp-server 接线 | 见第三节 LLM-AE 冲刺 |
 | STAB-01 稳定化（审计 P0/P1/P2 + 重复建工程 + 局部重渲） | 🚧 2026-10-05 起，分支 `fix/stab-01`，未提交；渲染/MCP/分析器已完成，服务核心与前端部分完成；build ✓、node --test 184/184 ✓，FB-04 待重跑 | 服务核心、渲染、MCP、前端、分析器（跨热点文件，集成者合并） | 已完成/待完成清单见 [docs/STAB-01-HANDOFF.md](docs/STAB-01-HANDOFF.md)；BUG-03/04 服务侧未修 |
 | FX-FIX-01 特效箱详情预览换素材即崩 + 节奏报告不再引导整帧闪白/震动 | ✅ Claude Code 会话（2026-10-05，用户指派），分支 `fix/fx-preview-context`（基于 `fix/stab-01` 9d30977），已写代码+已运行验证，**待集成者合并** | `src/project/EffectsBox.tsx`（EffectDetail 预览器生命周期）、`src/server/rhythm.mjs`（提示文案 + `flash.pulseSeconds/pulseRun`）、`scripts/tests/ae/rhythm.test.mjs`、`.agents/skills/videograph-aigc-film/`（SKILL.md、references/engine-compositing.md）、`.agents/skills/videograph-create/references/aesthetic-review.md` | ① 详情预览每次切换演示素材/拍速都先 `loseContext` 再在同一画布上新建预览器，而同一画布的 `getContext` 只会返回那个已丢失的上下文 → “着色器编译失败：null”。改为一块画布一个预览器、画布卸载后才释放，切换走 ref；`EffectDetail` 按动效 id 加 key。验证：真实浏览器里 3 个动效 × 4 种素材 × 2 轮 = 24 次切换，修复前 24/24 报错，修复后 0/24（脚本 `.cache/fx-switch-verify.mjs`，不进 Git）；`tsc -b` ✓。② 节奏报告的“死区/连续无下拍峰”提示原文是“加入随拍运动/下拍脉冲”，实际把 agent 引向逐拍全屏闪白、震动、推镜（《ループザルーム》PV 首版被用户指出观感差）。提示改为引导镜头内运动；新增“持续整帧明暗脉动”风格提示（每秒 ≥2 次的秒数 ≥8 且占时长 ≥20%）。两份 skill 同步改口径。`node --test scripts/tests/ae/rhythm.test.mjs` 17/17 ✓（新增 2 项）。未跑全量回归与 FB-04；未改 MCP 工具名/参数，MCP-GUIDE 无需同步。 |
+| VOCAL-M1 OpenUTAU 人声合成基础层 | 🚧 ZCode 会话（2026-10-06，用户指派），分支 `feat/vocal-m1`（基于 c51978e） | 新目录 `src/vocal/`、`scripts/tests/vocal/`、`docs/VOCAL.md`；不碰共享热点（无 package.json/依赖变更，CLI 直调 `node src/vocal/cli.mjs`） | 计划与调研结论见第三节「VOCAL 冲刺」；验收：vocal 测试套件全过（离线、假重采样器端到端）、`check` 空机器可诊断、零硬编码路径卫生测试、不删改既有测试 |
 | INTEGRATION 集成与发布检查 | 当前 AI 暂任，交接时明确更换 | 下述共享热点文件 | 审阅接口变更、统一接线、合并分支、跑全量验收，最后更新本计划 |
 | CLEANUP-01 移除旧演示视图（单镜头工坊/教学/创意/旧工作流），只保留真实工作台 | ✅ ZCode 会话（集成者）2026-10-01 完成，已合回 main | 删除 `src/shot/`（full-song.json 迁至 `src/song/data/`）、`src/components/`、`src/llm/`、`src/blackboard/`、`src/memory/`、`src/lyrics/`、`src/render/`、`src/pdoom/tasks.ts`、`src/types.ts`、`src/styles.css`（其中工程工作台复用的 53 条外壳/节点样式迁入 `project.css`）、7 个旧审计脚本；重写 `main.tsx`、`vite.config.ts`、`audit-all.mjs`、`mcp-server.ts`（0.2.0，仅 `project_*` 工具）；移除顶栏死链接 | 已运行验证：`npm run build`（包体 1706KB→451KB）、领域测试 24/24 + brand/协作/文档/反馈套件 45 过、`npm run audit`（project-view-audit 全绿）、`npm run audit:reference`、`transition-integration-audit`（隔离实例四模式全过）；MCP-GUIDE 同步 + sync-platform + skill 1.1.0。附注：audit-all 默认目标为参考复现工程，`VIDEOGRAPH_AUDIT_PROJECT` 可覆盖 |
 
