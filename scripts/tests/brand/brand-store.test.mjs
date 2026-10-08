@@ -109,3 +109,9 @@ test('非法输入拒绝：未知类型、空名称、超大字节、坏引用�
 test('默认根目录指向本机 .cache/brand，可被环境变量覆盖', () => {
   assert.ok(brandRoot().includes('.cache'), '默认存储必须在 .cache 下（.gitignore 已覆盖）');
 });
+
+test('metadata cannot inject bytes or a storage reference independently', () => {
+  for (const field of [{ bytes: 1 }, { ref: 'blobs/fake' }]) {
+    assert.throws(() => importBrandAsset(dir(), { name: 'logo', kind: 'logo', ...field }, png(7)), /存储层/);
+  }
+});

@@ -122,3 +122,12 @@ test('非法输入报 YamlError', () => {
   assert.throws(() => parseYaml('just a scalar line'), YamlError);
   assert.throws(() => parseYaml('a: {x: 1'), YamlError);
 });
+
+
+test('mapping keys cannot replace prototypes and duplicate keys are rejected', () => {
+  const parsed = parseYaml('__proto__:\n  polluted: true\n');
+  assert.equal(Object.getPrototypeOf(parsed), Object.prototype);
+  assert.equal(Object.hasOwn(parsed, '__proto__'), true);
+  assert.equal(parsed.polluted, undefined);
+  for (const text of ['a: 1\na: 2\n', 'x: {a: 1, a: 2}\n', '- a: 1\n  a: 2\n']) assert.throws(() => parseYaml(text), /duplicate/);
+});

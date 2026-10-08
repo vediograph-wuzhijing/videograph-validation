@@ -145,7 +145,7 @@ function parseScalarOrFlow(text) {
     for (const part of splitTop(s.slice(1, -1), ',')) {
       const idx = findMapColon(part);
       if (idx < 0) throw new YamlError(`流式映射缺冒号: ${part}`);
-      map[parseScalar(part.slice(0, idx))] = parseScalar(part.slice(idx + 1));
+      setMappingValue(map, parseScalar(part.slice(0, idx)), parseScalar(part.slice(idx + 1)));
     }
     return map;
   }
@@ -154,6 +154,13 @@ function parseScalarOrFlow(text) {
     return splitTop(s.slice(1, -1), ',').map(parseScalar);
   }
   return parseScalar(s);
+}
+
+function setMappingValue(map, key, value) {
+  key = String(key);
+  if (Object.hasOwn(map, key)) throw new YamlError(`duplicate mapping key: ${key}`);
+  // Define a data property so __proto__ is a literal key, never a prototype setter.
+  Object.defineProperty(map, key, { value, enumerable: true, writable: true, configurable: true });
 }
 
 function findMapColon(text) {
@@ -208,7 +215,7 @@ function parseMap(lines, start, indent) {
     if (colon < 0) throw new YamlError(`映射行缺冒号（第 ${i + 1} 行）: ${lines[i][1]}`);
     const key = parseScalar(lines[i][1].slice(0, colon));
     const [value, next] = readValue(lines, i, colon, indent);
-    map[typeof key === 'string' ? key : String(key)] = value;
+    setMappingValue(map, key, value);
     i = next;
   }
   return [map, i];
@@ -236,7 +243,7 @@ function parseSeq(lines, start, indent) {
       // 把 `- key: ...` 视作缩进 indent+2 上的键行，复用 readValue；virtualLines[0] 对应原文第 i 行。
       const virtualLines = [[indent + 2, body], ...lines.slice(i + 1)];
       const [value, consumed] = readValue(virtualLines, 0, colon, indent + 2);
-      entry[keyText] = value;
+      setMappingValue(entry, keyText, value);
       // consumed=1 表示值就在本行（下一行是 i+1）；否则值块消费到 virtualLines[consumed-1] = 原文 i+consumed-2。
       i = consumed === 1 ? i + 1 : i + consumed - 1;
       while (i < lines.length && lines[i][0] === indent + 2 && !isSeqLine(lines[i][1])) {
@@ -244,7 +251,7 @@ function parseSeq(lines, start, indent) {
         if (c < 0) throw new YamlError(`映射行缺冒号（第 ${i + 1} 行）: ${lines[i][1]}`);
         const k = parseScalar(lines[i][1].slice(0, c));
         const [v, n] = readValue(lines, i, c, indent + 2);
-        entry[typeof k === 'string' ? k : String(k)] = v;
+        setMappingValue(entry, k, v);
         i = n;
       }
       items.push(entry);

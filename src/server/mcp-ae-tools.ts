@@ -20,13 +20,13 @@ export const aeToolDefinitions = [
   },
   {
     name: 'project_filmstrip',
-    description: '看运动：把一段连续帧拼成一张网格图（≤24 格），每格标时间、小节.拍、下拍/K/S 与正在唱的词，下拍帧橙框。默认在目标时间段均匀取帧；around=t 时取 t 前后各 frames 帧（看冲击的起势与衰减）；sampleFps 指定密度。用真实引擎渲染，返回 MCP 图片。静帧看构图，filmstrip 看动作与节拍。',
+    description: '每轮改完运动/运镜/转场后默认自查：连续帧拼成网格（≤24格），标时间、拍点和唱词。局部约2秒12帧用start/end与sampleFps=6，不同时传shotId/transitionId，它们优先决定范围；around=t取前后各frames个工程帧。任务done后实际读图，看起势/落点/衰减、接缝与歌词提前暴露。真实引擎返回MCP图片；采样不代替完整播放或聆听。',
     inputSchema: { type: 'object', properties: { projectId: { type: 'string' }, ...rangeProperties, around: { type: 'number' }, frames: { type: 'integer', minimum: 1, maximum: 11 }, sampleFps: { type: 'number' }, thumbWidth: { type: 'integer', minimum: 160, maximum: 480 }, columns: { type: 'integer', minimum: 1, maximum: 12 }, ...waitProperty }, required: ['projectId'] },
   },
   {
     name: 'project_contact_sheet',
     description: '看全片：每个镜头取 1–3 帧（ratios，默认 0.45）拼成一张图，标镜头序号/标题/段落/时长/状态；未生成镜头显示占位。用于检查全片一致性、色彩推进、镜头之间是否雷同、段落强弱是否有起伏。返回 MCP 图片。',
-    inputSchema: { type: 'object', properties: { projectId: { type: 'string' }, ratios: { type: 'array', items: { type: 'number' }, maxItems: 3 }, thumbWidth: { type: 'integer', minimum: 160, maximum: 480 }, columns: { type: 'integer', minimum: 1, maximum: 12 }, ...waitProperty }, required: ['projectId'] },
+    inputSchema: { type: 'object', properties: { projectId: { type: 'string' }, selections:{type:'array',minItems:1,maxItems:120,items:{type:'object',properties:{shotId:{type:'string'},t:{type:'number'}},required:['shotId','t'],additionalProperties:false}}, ratios: { type: 'array', items: { type: 'number' }, maxItems: 3 }, thumbWidth: { type: 'integer', minimum: 160, maximum: 480 }, columns: { type: 'integer', minimum: 1, maximum: 12 }, ...waitProperty }, required: ['projectId'] },
   },
   {
     name: 'project_rhythm_report',
@@ -54,7 +54,7 @@ export async function callAeTool(name: string, args: Record<string, unknown>): P
   if (!kind) throw new Error(`unknown ae tool: ${name}`);
   // 整次调用控制在 MCP 客户端常见的 60 秒超时以内：入队最多 15 秒，等待只用剩余预算。
   const started = Date.now();
-  const job = await serviceFetch(`/projects/${projectId}/${kind}`, pick(args, ['shotId', 'transitionId', 'start', 'end', 'around', 'frames', 'sampleFps', 'thumbWidth', 'columns', 'ratios']), 15000);
+  const job = await serviceFetch(`/projects/${projectId}/${kind}`, pick(args, ['shotId', 'transitionId', 'start', 'end', 'around', 'frames', 'sampleFps', 'thumbWidth', 'columns', 'ratios','selections']), 15000);
   const budget = Math.floor(55 - (Date.now() - started) / 1000);
   const wait = Math.min(50, budget, Math.max(0, Number(args.waitSeconds ?? 25)));
   if (wait <= 0) return job;

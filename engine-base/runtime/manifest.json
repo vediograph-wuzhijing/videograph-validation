@@ -1,0 +1,296 @@
+{
+  "schema": "engine-base/v1",
+  "version": "0.2.0",
+  "origin": "pdoom-video",
+  "license": "MIT; fonts SIL-OFL-1.1 / public domain per upstream README",
+  "files": [
+    {
+      "file": "app/index.html",
+      "sha256": "3b9d056ef6dcc940aa82c623e82de3aeb6b4c188884db70275a23e84c825009e"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1000-300.ttf",
+      "sha256": "863ec9a266154b483ca2fb544a1ae886b2c2e725894ba14a7dd642ecff08836a"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1000-500.ttf",
+      "sha256": "bafcdd01342208afee59debeb1264abaeaedf7efcb067d96fe4ff20cf204cc22"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1000-700.ttf",
+      "sha256": "c19fb7f90860e8e6e5e7795a8b7ec603fc788c69cef7fbfa47d69674a4ce5847"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1000-900.ttf",
+      "sha256": "df7f620345ceaf9307c4c021d486d567035c3c3af9e29b12a892f7e5d4d8be48"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1125-300.ttf",
+      "sha256": "318687751c75f16b2f911d736179926da7b2edb48c6cc3a8083d93beefa31b08"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1125-500.ttf",
+      "sha256": "141642530cf681535aad885f5384ec6b5a355daa221ea64f06d0405448708a73"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1125-700.ttf",
+      "sha256": "57510ee1a63a64549244cdaa829a245795e1a901c48cb57891e2ac0ce530e9bd"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1125-900.ttf",
+      "sha256": "6b04492e0ff1dbf8e39c286cd8d32420a12363661dd331c4705c0822a8683318"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1250-300.ttf",
+      "sha256": "4fd218920884877281f203b81d2ddbb8af90cf1e58ab81830f2b4dc8cb06b377"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1250-500.ttf",
+      "sha256": "36a7bf442a40583b42272084a7fd036467dea5a54a9a106820083e48413851d3"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1250-700.ttf",
+      "sha256": "55a4492a5a97a6134ec83e289fbc2510d40031a432881a72ef6dd8ae302a380c"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w1250-900.ttf",
+      "sha256": "97954352b2fcb9d4a5917d658fc71a27db5bd6dad4fe1a8a77c171211860f286"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w620-300.ttf",
+      "sha256": "5a97cc5a200d8ab7e459c77ab8055fe06e7b3eaa3b04016a1333797f9a7f2cab"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w620-500.ttf",
+      "sha256": "c5a9c17c1ac8fbbb47345f805a73d933615db56ed4b2ca2ca84e9b9b3273b1e4"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w620-700.ttf",
+      "sha256": "6526f0939a591a3092368ffa5f9ec77e82d8cbbcf044dab17b9a0dfbaa4c151c"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w620-900.ttf",
+      "sha256": "7bf041853788deafccaf6626af105d63a2c4e9bfe90ed8f3722e49e635520e22"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w750-300.ttf",
+      "sha256": "2920a8b658d4fa4c596bd79f94577c36e8fc63a60e3260e9eaab3bacc911d4f0"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w750-500.ttf",
+      "sha256": "12a3814c240d98fbd3e12db49d87d9e8f7d303241450d2ce7a0d78fc2aff877d"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w750-700.ttf",
+      "sha256": "dd9741079f1f5dd5ad9842bc5152dcab9b01e52f1f1b545bcf347edd6858fcb7"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w750-900.ttf",
+      "sha256": "e544dc863d11d50b6b159f2459204b4f994fecf46f75d428c8ebfc118cc9e00f"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w875-300.ttf",
+      "sha256": "b6ddedcb6a7d5ae535f593bd4c84edf685c7c30fa8d57d61b03c1b956156d0fe"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w875-500.ttf",
+      "sha256": "838d87c7f772488cdb67ad2c719a42c716d52ebcfaae1068e5fde10bd1d0ba99"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w875-700.ttf",
+      "sha256": "c37e23695fc6352f35ef9efcb64e86cfbcf124e235cccda9fa83cde88792ac79"
+    },
+    {
+      "file": "app/public/fonts/Archivo-w875-900.ttf",
+      "sha256": "3f2011e473d614bf899e2c2f1c7b67e4fbf61b505dfc0543a0547a35c18c5adf"
+    },
+    {
+      "file": "app/public/fonts/ArchivoItalic-w1000-400.ttf",
+      "sha256": "e458ef98ab695b2dbcb53441edcbbb7d8b86fda2dbd7542513a6aa37762c8750"
+    },
+    {
+      "file": "app/public/fonts/ArchivoItalic-w1000-800.ttf",
+      "sha256": "9e8c5abbb79942428dee6a133483a146f223c790b5f0ee3c0cb3280c8776e99c"
+    },
+    {
+      "file": "app/public/fonts/ArchivoItalic-w750-400.ttf",
+      "sha256": "70d6ff465ae66aa0cb424c5452e13b1dbb19b913adf3ed80b9bc59575cb90203"
+    },
+    {
+      "file": "app/public/fonts/ArchivoItalic-w750-800.ttf",
+      "sha256": "bc7fa2efc9a4aa22960cfcfbe50025c8d82ff177f4e9a3e016cf0665dbee918c"
+    },
+    {
+      "file": "app/public/fonts/Cormorant-400.ttf",
+      "sha256": "4e7958f688e875a0073febb1fdbcc87d85babedf7705ae9e70ecc9513eae9c3e"
+    },
+    {
+      "file": "app/public/fonts/Cormorant-600.ttf",
+      "sha256": "6cdad32e7e609276adf97085c6fc21a259f311e3b8bdc880784222bdf8911727"
+    },
+    {
+      "file": "app/public/fonts/CormorantItalic-400.ttf",
+      "sha256": "272bae4becdd77c6f8cf3a252a775212b88c1c8c5a28a0cf8ef799d6887cacda"
+    },
+    {
+      "file": "app/public/fonts/CormorantItalic-600.ttf",
+      "sha256": "436ab920355e6f186f19183c749a2c0bb2592ebf86fabe4bcffd83b17b3fbc5a"
+    },
+    {
+      "file": "app/public/fonts/src/Archivo-Italic[wdth,wght].ttf",
+      "sha256": "305d13b4eb80e62f7d517f78d7c045250d977552a420f2dbed906f314e761305"
+    },
+    {
+      "file": "app/public/fonts/src/Archivo[wdth,wght].ttf",
+      "sha256": "0e094a7d3c7c4c25cf1310c4b30014f1dae9332220b1c2c88f4fa996f0b05053"
+    },
+    {
+      "file": "app/public/fonts/src/Cormorant-OFL.txt",
+      "sha256": "60700d351cac4650c51f3f9db318d2a420f8b45052dba2715eb5fec41f0f6956"
+    },
+    {
+      "file": "app/public/fonts/src/CormorantGaramond-Italic[wght].ttf",
+      "sha256": "0f48ea6abb2084537854f7174c470991a463b13036309e3b50a81511611c530d"
+    },
+    {
+      "file": "app/public/fonts/src/CormorantGaramond[wght].ttf",
+      "sha256": "b20b7d9626dd956b2c5e558692ad328b1f19e3275e2782db4fa07670d83f35e0"
+    },
+    {
+      "file": "app/public/fonts/src/IBMPlexMono-Bold.ttf",
+      "sha256": "ac27abd6450a64dd94467580a02fe6235156d5b92f2926ebbc8e7489df64e0be"
+    },
+    {
+      "file": "app/public/fonts/src/IBMPlexMono-Italic.ttf",
+      "sha256": "3362fc791b0652193328b862c1c5f23a789bc7288b1617fa63302f88689a2a34"
+    },
+    {
+      "file": "app/public/fonts/src/IBMPlexMono-Light.ttf",
+      "sha256": "780bcf65509d72a35ec114b57bcbe220dc6b77d8ea2e9b25e294be3c570c5025"
+    },
+    {
+      "file": "app/public/fonts/src/IBMPlexMono-Medium.ttf",
+      "sha256": "a9b4c49bb299e05b5f6c481e7fb5e78943d2793249a0c8874ab574a2d1ea6755"
+    },
+    {
+      "file": "app/public/fonts/src/IBMPlexMono-Regular.ttf",
+      "sha256": "6a3412f058c7d8dfd9170c41e85ade48e5156ecb89356110ca57a0a27734af46"
+    },
+    {
+      "file": "app/public/fonts/src/IBMPlexMono-SemiBold.ttf",
+      "sha256": "d3c38e55c78f5b0f28009fddba4834ec503278936a5986032424c9bd2d23aa46"
+    },
+    {
+      "file": "app/public/fonts/src/OFL.txt",
+      "sha256": "393a694c7dee6694a22c73049e95cea5d0808697a872c435862d33c0afc67091"
+    },
+    {
+      "file": "app/public/fonts/src/Plex-OFL.txt",
+      "sha256": "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+    },
+    {
+      "file": "app/public/fonts/stroke/EMSAllure.svg",
+      "sha256": "c5572395a57d2abdce1efdfc5a584fe83048aa7bef4a3f9acb63f15805c6b824"
+    },
+    {
+      "file": "app/public/fonts/stroke/EMSFelix.svg",
+      "sha256": "f8b040e1538b9d9d64d7706eb0899013769867562f0317a120270313b32b4930"
+    },
+    {
+      "file": "app/public/fonts/stroke/EMSOsmotron.svg",
+      "sha256": "eecf1c78895a7008986090e9c411189d4d5d2cd0737864db9130be9d62234205"
+    },
+    {
+      "file": "app/public/fonts/stroke/EMSReadability.svg",
+      "sha256": "4fbf04a9f7e38cbd286ac4b2cafbf43dbc456222b3ec4d12e331bc2ff862b0c8"
+    },
+    {
+      "file": "app/public/fonts/stroke/EMSTech.svg",
+      "sha256": "603a5504257fa5b871f435f21832152153206489e5e6ddbd63d1b8368ff9b466"
+    },
+    {
+      "file": "app/public/fonts/stroke/HersheySans1.svg",
+      "sha256": "ab0afc9e13538ab78fd51766a41345d0b74054274fee29542102d2b63e5df652"
+    },
+    {
+      "file": "app/public/fonts/stroke/HersheyScript1.svg",
+      "sha256": "b9efe75e227cc7893889f994651939df9c7b706bb9acdac383e4b321c1dfa7bd"
+    },
+    {
+      "file": "app/public/fonts/stroke/HersheySerifMed.svg",
+      "sha256": "18f1ff669a07516912060fe79af0da944c016ce8a97a5eb621056c080496e409"
+    },
+    {
+      "file": "app/src/engine/audio.ts",
+      "sha256": "d5a7509fe7a99b6f1ae56d930fab645c5c305c62e4a070ea50cc2c3857690551"
+    },
+    {
+      "file": "app/src/engine/engine.ts",
+      "sha256": "c18ffd421b82fbc8c65b82aafc91c763e3008e41620e350d1a7dfcd5126a765e"
+    },
+    {
+      "file": "app/src/engine/gl.ts",
+      "sha256": "22c14df195697d3dda5d498b9b4e529679539f2641f1e763bd19e24fbf192765"
+    },
+    {
+      "file": "app/src/engine/glsl/common.ts",
+      "sha256": "a573bce04e6cf4c75baa28575e926af697677f5ff8139452719b3f388dcc5ad7"
+    },
+    {
+      "file": "app/src/engine/hud.ts",
+      "sha256": "5276800a686ae55ace137733bb67b1c94fc947922e728685326933c9ef596beb"
+    },
+    {
+      "file": "app/src/engine/lines.ts",
+      "sha256": "a11f2040e435ffef4c8a932f3a539dc3c46b7c8cc4167e5d92d1644dc69eca7c"
+    },
+    {
+      "file": "app/src/engine/lyrics.ts",
+      "sha256": "413c111466d2b7701fbf0d06f5d6985d2e7c503e8947673810e923443bfedfb9"
+    },
+    {
+      "file": "app/src/engine/palette.ts",
+      "sha256": "87c5d152a207843200dcd026b0710d55ff6fd70f462bc6313d87db56e4d6c452"
+    },
+    {
+      "file": "app/src/engine/post.ts",
+      "sha256": "114a50079b44ef8cc96b341b65579de691e5f02009aa18f62722c7bd3b3f89e2"
+    },
+    {
+      "file": "app/src/engine/scale.ts",
+      "sha256": "31f01a0bfdd077c64744aa12fd4de9af326f50cf2bc26148a2d78917e1a158dc"
+    },
+    {
+      "file": "app/src/engine/scene.ts",
+      "sha256": "3717cc15ae86c034357cc21f38a72cd7cc09f10d1cbc0d5fbba442d443016509"
+    },
+    {
+      "file": "app/src/engine/stroke.ts",
+      "sha256": "336686f1949c40866a2b53058d02d349748f9b5de11b650bf6a7bb3998aea8c8"
+    },
+    {
+      "file": "app/src/engine/type.ts",
+      "sha256": "ee747da2fa95fb50cb851608c4cae61bd52a9b1402f7d102b13671211cfa2e8e"
+    },
+    {
+      "file": "app/src/engine/util.ts",
+      "sha256": "08b0dcd616ab93545c6ed8c9a33698bb98edac2e753954911628ee87cf5bf96d"
+    },
+    {
+      "file": "app/src/main.ts",
+      "sha256": "e37494dd84246929d746e052c9adbff6f7300c76910fe99199079b18e466da14"
+    },
+    {
+      "file": "CREDITS.md",
+      "sha256": "67981869c482e2025d5d52e4f3d4ec0cde7f84e567205a13a448ddfe6d4bbfb4"
+    },
+    {
+      "file": "docs/ENGINE.md",
+      "sha256": "33fd058a0a9efdf6f2350cec9d69b4a72414b40a4d67a22adb8e46826ee753a2"
+    },
+    {
+      "file": "LICENSE",
+      "sha256": "aa1e401572af5ab464c350862fe86d8695e8ca2af73f83d1972b0cab1a6d44a4"
+    }
+  ]
+}

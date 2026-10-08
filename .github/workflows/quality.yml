@@ -1,0 +1,21 @@
+name: Quality
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  portable:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Check source distribution boundary and engine hashes
+        run: node scripts/check-release-source.mjs
+      - run: npm ci
+      - run: npm run build
+      - run: npm run check

@@ -13,6 +13,8 @@ projects/
 .env
 .env.*
 !.env.example
+workbench.json
+.videograph/
 *.log
 *.sqlite
 *.sqlite-wal
@@ -20,10 +22,39 @@ projects/
 .claude/settings.local.json
 
 # Local song files (not covered by the reference code license)
+/video/
 /public/audio/*
 !/public/audio/.gitkeep
 /*.mp3
 /*.wav
+
+# Non-redistributable user media, banks and models (keep local copies).
+*.mp3
+*.wav
+*.flac
+*.m4a
+*.ogg
+*.opus
+*.aac
+*.wma
+*.aiff
+*.aif
+*.sf2
+*.sfz
+*.mid
+*.midi
+*.mp4
+*.mov
+*.webm
+*.avi
+*.mkv
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.gguf
+*.ggml
+*.safetensors
 
 # Root-level generated audits and operator responses
 /*-audit.png

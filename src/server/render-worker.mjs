@@ -7,12 +7,15 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { startReferenceServer, hostRuntimeSource, HOST_PATCH_VERSION } from './reference-server.mjs';
-import { projectDir, readJob, saveJob, mutateProject, sha256, productRoot } from './project-store.mjs';
+import { projectDir, readJob, mutateProject, sha256, productRoot } from './project-store.mjs';
+import { saveJobProgress as saveJob } from './project-repository.mjs';
 import { normalizeProject, transitionPair, transitionWindow, transitionConfig } from './transitions.mjs';
 import { withTimeout, evalBudget, writeAtomic, renameRetry, shotAssetIndex, segmentParts, segmentKey, missReason, cacheSummary, readCacheIndex, assertCoverage } from './render-cache.mjs';
 import { analyzeRhythm, beatLabel, motionSeries, RHYTHM_VERSION } from './rhythm.mjs';
 import { pageSample, pageComposeGrid, pageDrawChart } from './ae-page.mjs';
 import { browserPath, angleArgs } from './browser.mjs';
+import { selectedAudio } from './audio-track.mjs';
+import { projectManifestFile, projectEngineFile, projectDataRoot, verifyGeneration } from './project-generation.mjs';
 
 const [projectId, jobId] = process.argv.slice(2);
 const job = readJob(projectId, jobId);
@@ -134,9 +137,10 @@ try {
     const actual = JSON.parse(readFileSync(join(productRoot, `node_modules/${pkg}/package.json`), 'utf8')).version;
     if (actual !== version) throw new Error(`引擎依赖版本改变：${pkg} 需要 ${version}，当前 ${actual}`);
   }
-  const manifest = JSON.parse(readFileSync(join(dir, 'engine-manifest.json'), 'utf8'));
+  verifyGeneration(dir, frozen);
+  const manifest = JSON.parse(readFileSync(projectManifestFile(dir, frozen), 'utf8'));
   for (const [path, hash] of manifest.files) {
-    if (sha256(readFileSync(join(dir, 'engine', path))) !== hash) throw new Error(`引擎快照被外部修改：${path}；请重新导入或通过镜头源码工具创建新版本。`);
+    if (sha256(readFileSync(projectEngineFile(dir, frozen, path))) !== hash) throw new Error(`引擎快照被外部修改：${path}；请重新导入或通过镜头源码工具创建新版本。`);
   }
   // 只哈希真正注入渲染页的宿主代码与补丁版本；整份 reference-server/transitions 源码任何无关改动都会让全片分段缓存失效。
   const hostHash = sha256(`${HOST_PATCH_VERSION}\n${hostRuntimeSource()}`);
@@ -160,7 +164,9 @@ try {
   frameSocket = new WebSocketServer({ host: '127.0.0.1', port: 0, maxPayload: 1920 * 1080 * 4 + 1024,
     verifyClient: ({ req, origin }) => frameToken !== null && req.url === `/${frameToken}` && origin === server?.url });
   await once(frameSocket, 'listening');
-  server = await startReferenceServer({ root: join(dir, 'engine'), shots, transitions, fps, audioFile: frozen.audio.engineFile, framePort: frameSocket.address().port });
+  const soundtrack = selectedAudio(frozen);
+  if (frozen.vocal?.active && sha256(readFileSync(join(dir, 'engine', soundtrack.engineFile))) !== soundtrack.hash) throw new Error('导出音轨内容与冻结版本不一致');
+  server = await startReferenceServer({ root: join(dir, 'engine'), dataRoot: projectDataRoot(dir, frozen), shots, transitions, fps, audioFile: soundtrack.engineFile, framePort: frameSocket.address().port });
   browser = await chromium.launch({ headless: true, executablePath: browserPath(),
     args: [...angleArgs(), '--ignore-gpu-blocklist', '--enable-gpu-rasterization', '--disable-background-timer-throttling'] });
   signal.addEventListener('abort', () => { void browser?.close(); }, { once: true });
@@ -272,24 +278,24 @@ try {
     }
 
     if (job.kind === 'contact-sheet') {
-      const key = keyFor(shots);
+      const selectedGroups=input.selections?input.selections.map(entry=>({shot:shots.find(s=>s.id===entry.shotId),times:[entry.t]})):shots.map(shot=>({shot,times:input.ratios.map(ratio=>Math.min(shot.end-1/fps,shot.start+(shot.end-shot.start)*ratio))}));
+      const key = keyFor(selectedGroups.map(group=>group.shot));
       if (!existsSync(join(dir, 'artifacts', `${key}.png`))) {
         const tiles = [];
-        for (const [index, shot] of shots.entries()) {
+        for (const [index, {shot,times}] of selectedGroups.entries()) {
           const section = (frozen.song.sections ?? []).find((entry) => shot.start >= entry.start - 0.05 && shot.start < entry.end - 0.05)?.name ?? '';
-          const head = `#${index + 1} ${shot.title ?? shot.id}`, sub = `${shot.start.toFixed(1)}–${shot.end.toFixed(1)}s ${section} ${shot.status ?? ''}`;
-          const times = input.ratios.map((ratio) => Math.min(shot.end - 1 / fps, shot.start + (shot.end - shot.start) * ratio));
+          const head = `#${shots.indexOf(shot)+1} ${shot.title ?? shot.id}`, sub = `${shot.start.toFixed(1)}–${shot.end.toFixed(1)}s ${section} ${shot.status ?? ''}`;
           if (!shot.module) { for (const _ of times) tiles.push({ placeholder: '未生成源码', lines: [head, sub] }); continue; }
           await loadShot(shot, previousOf(shot));
           const sample = await sampleShot(shot, { times, sequential: false, thumbWidth: input.thumbWidth });
           checkErrors(sample, shot);
-          sample.thumbs.forEach((png) => tiles.push({ png, lines: [head, sub] }));
-          progress(`全片缩略图 ${index + 1}/${shots.length}`, (index + 1) / shots.length);
+          sample.thumbs.forEach((png,i) => tiles.push({ png, lines: [head, `${times[i].toFixed(3)}s · ${sub}`] }));
+          progress(`联系表 ${index + 1}/${selectedGroups.length}`, (index + 1) / selectedGroups.length);
         }
         save(key, await compose(pageComposeGrid, { tiles, columns: input.columns, tileWidth: input.thumbWidth, title: `全片缩略图 · ${shots.length} 镜头 · 每镜 ${input.ratios.length} 帧（${input.ratios.join('/')}）` }));
       }
       job.result = { revision: frozen.revision, images: [{ file: `artifacts/${key}.png`, kind: 'contact-sheet', contentHash: sha256(readFileSync(join(dir, 'artifacts', `${key}.png`))) }],
-        shots: shots.map((shot, index) => ({ index: index + 1, id: shot.id, title: shot.title, start: shot.start, end: shot.end, status: shot.status })) };
+        selections:input.selections, shots: selectedGroups.map(({shot}) => ({ index: shots.indexOf(shot)+1, id: shot.id, title: shot.title, start: shot.start, end: shot.end, status: shot.status })) };
       return;
     }
 
@@ -428,10 +434,10 @@ try {
     writeFileSync(list, segments.map((path) => `file '${path.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`).join('\n'));
     const output = join(outDir, 'pv.mp4');
     progress('合成全片并封装完整 BGM…', 0.99);
-    await runFfmpeg(['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-i', join(dir, 'engine', frozen.audio.engineFile ?? 'audio/pdoom.mp3'),
+    await runFfmpeg(['-y', '-v', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-i', join(dir, 'engine', selectedAudio(frozen).engineFile),
       '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '320k', '-af', 'apad', '-t', String(total / fps), '-movflags', '+faststart', output]);
     job.result = { file: `exports/${jobId}/pv.mp4`, frames: total, seconds: total / fps, fps, samples, revision: frozen.revision, transitions: frozen.transitions.map(({ id, fromShotId, toShotId, mode, duration, easing, direction }) => ({ id, fromShotId, toShotId, mode, duration, easing, direction })), reports, cacheSummary: cacheSummary(reports) };
-    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ ...job.result, engineHash: frozen.engineHash, audioHash: frozen.audio.hash, credits: frozen.credits }, null, 2));
+    writeFileSync(join(outDir, 'manifest.json'), JSON.stringify({ ...job.result, engineHash: frozen.engineHash, audioHash: frozen.audio.hash, soundtrack: selectedAudio(frozen), vocal: frozen.vocal?.active ?? null, credits: frozen.credits }, null, 2));
   } else if (!['stills', 'filmstrip', 'contact-sheet', 'rhythm'].includes(job.kind)) job.result = { revision: frozen.revision, reports };
   }
   job.status = 'done'; job.finishedAt = Date.now(); progress('完成', 1);

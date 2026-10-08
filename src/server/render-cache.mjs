@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, parse, relative } from 'node:path';
+import { renameRetrySync } from '../platform/files.mjs';
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
@@ -17,17 +18,8 @@ export function evalBudget(frames, perFrame = Number(process.env.VIDEOGRAPH_EVAL
   return Math.max(60000, Math.ceil(frames) * perFrame);
 }
 
-const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 /** Windows 上目标文件正被读取（播放、杀毒扫描）时 rename 会短暂报 EPERM/EBUSY：退避重试。 */
-export function renameRetry(from, to, attempts = 6) {
-  for (let i = 0; ; i++) {
-    try { renameSync(from, to); return; }
-    catch (error) {
-      if (i + 1 >= attempts || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) throw error;
-      sleepSync(50 * 2 ** i);
-    }
-  }
-}
+export const renameRetry = renameRetrySync;
 export function writeAtomic(path, data) {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try { writeFileSync(temporary, data); renameRetry(temporary, path); }

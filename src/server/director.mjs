@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { readProject, mutateProject, listJobs, readJob, projectDir, sha256, ProjectError } from './project-store.mjs';
+import { analysisIdentity, productionIdentity, scopeIdentity } from './project-signatures.mjs';
 
 const dimensions = ['composition', 'hierarchy', 'readability', 'semantics', 'rhythm', 'consistency', 'originality'];
-const terminal = new Set(['done', 'error', 'cancelled', 'interrupted']);
 const tools = { analysis: 'song_analysis_get', retry: 'song_analysis_retry', direction: 'project_director_submit', plan: 'project_plan_submit', generate: 'project_shot_source', transition: 'project_transition_get', validate: 'project_validate', 'validate-transition': 'project_transition_validate', stills: 'project_stills', filmstrip: 'project_filmstrip', rhythm: 'project_rhythm_report', 'contact-sheet': 'project_contact_sheet', review: 'project_review_submit', export: 'project_render' };
 const check = (ok, text, status = 400) => { if (!ok) throw new ProjectError(text, status); };
 const text = (value, name, max = 4000) => { check(typeof value === 'string' && value.trim() && value.length <= max, `${name} 需要非空文本（≤${max} 字符）`); return value.trim(); };
@@ -27,38 +27,26 @@ function withSignatureMemo(read) {
   memoScope = new WeakMap();
   try { return read(); } finally { memoScope = null; }
 }
-export function analysisSignature(project) { return memo(project, 'analysis', () => signature({ audio: project.audio.hash, song: project.song })); }
-const targetData = (target) => target && ({ id: target.id, token: target.inputToken, start: target.start, end: target.end, module: target.module, code: target.codeHash, params: target.params, post: target.post, mode: target.mode, duration: target.duration, from: target.fromShotId, to: target.toShotId });
+export function analysisSignature(project) { return memo(project, 'analysis', () => analysisIdentity(project)); }
 // 旧任务快照可能缺 shots/transitions（2026-09-30 前的反馈流程）；缺数组按空算，签名自然不匹配而非崩溃。
-const targetArrays = (project) => ({ shots: project.shots ?? [], transitions: project.transitions ?? [] });
 export function productionSignature(project) {
   return memo(project, 'production', () => productionSignatureRaw(project));
 }
 function productionSignatureRaw(project) {
-  const { shots, transitions } = targetArrays(project);
-  return signature({ engine: project.engineHash, analysis: analysisSignature(project), output: project.output, direction: project.director?.version, shots: shots.map(targetData), transitions: transitions.map(targetData) });
+  return productionIdentity(project, analysisSignature(project));
 }
 function scopeSignature(project, kind, targetId) {
   return memo(project, `scope:${kind}:${targetId}`, () => scopeSignatureRaw(project, kind, targetId));
 }
 function scopeSignatureRaw(project, kind, targetId) {
-  const { shots, transitions } = targetArrays(project);
-  if (kind === 'shot') {
-    const target = shots.find((s) => s.id === targetId);
-    return signature({ engine: project.engineHash, analysis: analysisSignature(project), output: project.output, direction: project.director?.version, target: targetData(target), transitions: transitions.filter((t) => t.fromShotId === targetId || t.toShotId === targetId).map((t) => ({ ...targetData(t), sides: shots.filter((s) => s.id === t.fromShotId || s.id === t.toShotId).map(targetData) })) });
-  }
-  if (kind === 'transition') {
-    const t = transitions.find((entry) => entry.id === targetId);
-    return signature({ engine: project.engineHash, analysis: analysisSignature(project), output: project.output, direction: project.director?.version, target: targetData(t), sides: shots.filter((s) => s.id === t?.fromShotId || s.id === t?.toShotId).map(targetData) });
-  }
-  return productionSignature(project);
+  return scopeIdentity(project, kind, targetId, analysisSignature(project));
 }
 export function jobMatches(project, job) {
-  if (!job?.input?.project || job.projectId !== project.id) return false;
+  if ((!job?.input?.project && !job?.input?.scopeSignature) || job.projectId !== project.id) return false;
   const input = job.input;
   if (input.stills?.version === 'before-feedback') return false;
   const kind = input.shotId ? 'shot' : input.transitionId ? 'transition' : 'project';
-  return scopeSignature(project, kind, input.shotId ?? input.transitionId) === scopeSignature(input.project, kind, input.shotId ?? input.transitionId);
+  return scopeSignature(project, kind, input.shotId ?? input.transitionId) === (input.scopeSignature ?? scopeSignature(input.project, kind, input.shotId ?? input.transitionId));
 }
 const targetOf = (project, kind, id) => (kind === 'shot' ? project.shots : project.transitions).find((entry) => entry.id === id);
 function validTechnical(project, target, kind) {
@@ -325,6 +313,7 @@ export function submitReview(id, expectedProjectRevision, review) {
   });
 }
 export function acceptDirectorReview(id, expectedProjectRevision) {
+  check(Number.isSafeInteger(expectedProjectRevision) && expectedProjectRevision >= 0, '需要 expectedProjectRevision');
   return mutateProject(id, expectedProjectRevision, (project) => {
     const review = reviewState(project);
     check(review.current && review.issues.every((issue) => issue.severity !== 'blocking'), '只能接受当前版本且无阻塞问题的导演自评', 409);

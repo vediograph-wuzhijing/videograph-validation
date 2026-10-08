@@ -1,7 +1,7 @@
 # 特效箱动效编写指南（给批量编写的 agent）
 
 > 样板：`effects/box/riso-two-ink.glsl`——**先完整读一遍它的注释**，它就是规范。本文件只补充流程、验收和分工。
-> 计划与进度见 ROADMAP「FX 冲刺」；MCP 使用见 `docs/MCP-GUIDE.md`。
+> 计划与进度统一见 [ROADMAP](../ROADMAP.md)；已实现工具见 [MCP-GUIDE](MCP-GUIDE.md)，其他资料见 [文档中心](README.md)。
 
 ## 1. 交付物
 

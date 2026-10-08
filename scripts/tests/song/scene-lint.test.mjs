@@ -25,3 +25,7 @@ test('子串引用也校验；无 ly.get 的场景通过；空代码拒绝', () 
   assert.equal(lintSceneCode('export default class X {}', analysis).ok, true);
   assert.equal(lintSceneCode('', analysis).ok, false);
 });
+test('注释和展示字符串不冒充调用；真实转义字面量按语法解析',()=>{
+  assert.equal(lintSceneCode("// 不要 ly.get('原句')\nconst help=\"ly.get('old lyric')\";",analysis).ok,true);
+  assert.equal(lintSceneCode("ly.get('第二句\\u4e2d文歌词');",analysis).ok,true);
+});

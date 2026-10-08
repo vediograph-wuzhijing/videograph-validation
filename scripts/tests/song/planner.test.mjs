@@ -43,6 +43,16 @@ test('未知锚定行、越界 t、词中间 t 拒绝', () => {
   assert.throws(() => cutFromAnchor(analysis, { t: 99 }), /越界/);
   assert.throws(() => cutFromAnchor(analysis, { t: 2.5 }), /词的中间/);
   assert.throws(() => cutFromAnchor(analysis, {}), /lineText\/sectionIndex\/t/);
+  assert.throws(() => cutFromAnchor(analysis, {t:NaN}), /有限数字/);
+  assert.throws(() => cutFromAnchor(analysis, {t:Infinity}), /有限数字/);
+});
+test('持续段/警告策略保留真实词时序；词起音附近仍拒绝 sustain',()=>{
+  const analysis=fixture(), original=structuredClone(analysis.lyrics);
+  assert.equal(cutFromAnchor(analysis,{t:2.5,cutPolicy:'sustain'}),2.5);
+  assert.throws(()=>cutFromAnchor(analysis,{t:2.03,cutPolicy:'sustain'}),/词的中间/);
+  const plan=validatePlan([{t:0},{t:2.5,cutPolicy:'warn'},{t:6}],analysis);
+  assert.ok(plan.warnings.some(w=>w.includes('持续段')));
+  assert.deepEqual(analysis.lyrics,original);
 });
 test('候选切点集合：行切点 + 段落边界 + 不在词中的小节线，升序', () => {
   const analysis = fixture();

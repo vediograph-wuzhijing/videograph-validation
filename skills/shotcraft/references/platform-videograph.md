@@ -1,6 +1,6 @@
 # platform-videograph.md — VideoGraph 平台适配
 
-平台根目录：本仓库（权威交接文档：`HANDOFF.md`）。
+平台根目录：本仓库。已实现工具以 `docs/MCP-GUIDE.md` 为准；当前说明从 `docs/README.md` 进入，计划与进度只见 `ROADMAP.md`。
 唯一执行管线是**全引擎管线**（旧工坊 mini-engine 队列已随 CLEANUP-01 移除）：
 
 | | 全引擎管线 |
@@ -43,12 +43,22 @@ projects/<uuid>/
 
 <!-- BEGIN:generated-from-MCP-GUIDE (scripts/skills/sync-platform.mjs 自动生成；勿手编) -->
 
-**工具速查（自动生成自 `docs/MCP-GUIDE.md` §3，toolset 2026-10-05；勿手编——更新请跑 `node scripts/skills/sync-platform.mjs`）**
+**工具速查（自动生成自 `docs/MCP-GUIDE.md` §3，toolset 2026-10-08；勿手编——更新请跑 `node scripts/skills/sync-platform.mjs`）**
 
 | 工具 | 参数 | 作用 |
 |---|---|---|
+| `scene_component_search` | `query?` | 检索相机、投影、世界卡片、海/天空/水下、逐字动画、独立图层 |
+| `scene_component_get` | `id` | 获取类型化基础件源码/导出/用法；新工程 import，旧工程内联，不改冻结引擎 |
+| `project_vocal_import_midi` | `projectId, midiPath, trackIndex?, channel?, lyrics?, tempo… | 只读 MIDI→乐谱草稿，显式选择单声部；假名配词并验证本机声库 CV/VCV 别名，不自动提交 |
+| `project_vocal_import_audio` | `projectId, expectedInputRevision, audioPath, offsetMs?, re… | 外部干轨冻结导入，offsetMs 对齐，可带乐谱和参考干轨；渲染后人工采用，频段报告比较实际 dBFS |
 | `project_list` | — | 本地工程列表：`id / name / status / shots / duration / revision / createdAt`（按… |
-| `project_create_from_audio` | `audioPath` | **新建**工程，只在用户明确要新片时调用。可选 `name / lyricsText / lrcPath / language / stag… |
+| `service_health_get` | — | 健康、运行代码是否过期、数据库大小、任务/操作积压和迁移状态；使用缓存采样，不读任务大行 |
+| `project_version_get` | `projectId` | 轻量 `revision / jobsVersion`；改变时再拉工程或最近任务，不轮询整个任务表 |
+| `project_scene_module_submit` | `projectId, moduleId, expectedProjectRevision, code, bindin… | 一份源码、一个修订；bindings 含每镜 shotId/expectedInputRevision，可含 params/attemptTo… |
+| `project_draft_check` | `projectId, shotId, expectedProjectRevision` | 可选 code/params。类型检查和初始化材料的着色器编译，不出帧、不写任务/修订；render 中才创建的材料需要正式验证，结果明确说明… |
+| `project_draft_preview` | `projectId, shotId, expectedProjectRevision` | 可选 code/params，返回真实引擎的临时草稿播放器 URL；不写源码/任务/修订，支持连续运动观察 |
+| `project_draft_stills` | `projectId, shotId, expectedProjectRevision` | 可选 code/params/times（镜头内最多12帧）；直接返回有镜头号和时间的临时 PNG 联系表，不建立任务 |
+| `project_create_from_audio` | `audioPath` | **新建**工程，只在用户明确要新片时调用。可选 `truth` 跳过自动分析（见上文）；还可选 `name / lyricsText / l… |
 | `project_create_from_bgm` | `audioPath` | `project_create_from_audio` 的别名（保留兼容），可选 `name / allowDuplicate` |
 | `project_get` | `projectId` | 完整工程：镜头、转场、意见、版本、输出规格。默认只返回歌曲摘要，`includeAnalysis: true` 返回完整词级歌词/节拍/包络 |
 | `project_director_get` | `projectId` | 读取导演方案、工程 `revision`、当前 `phase/actions/blockers/review/exportReady/resu… |
@@ -60,10 +70,14 @@ projects/<uuid>/
 | `project_review_submit` | `projectId, expectedProjectRevision, review` | 提交 summary/七项 assessments/evidence/issues/protect；结构见 §6。真实当前证据覆盖每镜 sti… |
 | `song_analysis_get` | `projectId` | 读取 `videograph-analysis/v2` 分析与 `provenance`、当前 `inputRevision`。默认层 `au… |
 | `song_lyrics_submit` | `projectId, expectedInputRevision, lyrics` | 整层替换歌词：`{ lines: [{ text, start, end, words: [{ w, start, end }] }], la… |
-| `song_analysis_confirm` | `projectId` | 确认分析，`analysis-draft → analysis-confirmed`。agent 可调用，记为 `confirmedBy: m… |
-| `song_analysis_retry` | `projectId` | 仅 `analysis-failed` 可重试，重新排队分析并转 `analysis-pending`；等 `project_get` 返回 … |
+| `song_analysis_confirm` | `projectId, expectedInputRevision` | 确认分析，`analysis-draft → analysis-confirmed`。agent 可调用，记为 `confirmedBy: m… |
+| `song_analysis_retry` | `projectId, expectedInputRevision` | 仅 `analysis-failed` 可重试，重新排队分析并转 `analysis-pending`；等 `project_get` 返回 … |
 | `song_analysis_patch` | `projectId, expectedInputRevision, patch` | 仅规划前的 `analysis-draft / analysis-confirmed` 可用；以工程版本整层替换 `patch.rhythm`… |
 | `project_plan_submit` | `projectId, expectedInputRevision` | 仅 `analysis-confirmed` 可用。`plan: [{ lineText | sectionIndex | t, title?… |
+| `project_vocal_get` | `projectId` | 乐谱独立 inputRevision、draft、candidate、active；候选含人声/混音 WAV、USTX、LRC、pitchRe… |
+| `project_vocal_check` | `projectId` | 本机声库、契约与真实 oto 别名（最多 1000 个，超出有标记）；缺配置返回 ready=false，不要求 OpenUtau GUI |
+| `project_vocal_submit` | `projectId, expectedInputRevision, plan` | 固定 BPM、单轨单 part、480 tick/拍；note 的 lyric=真实 oto 别名，pitch/tone、startBeats… |
+| `project_vocal_render` | `projectId, expectedInputRevision` | 冻结乐谱/配置并渲染曲线、颤音、包络/力度及混音，返回后台 vocal 任务；用 project_job_get 查询、project_job… |
 | `project_shot_lyrics` | `projectId, shotId` | 镜头窗口内词级歌词、`instrumental` 标记、已有 `lyricPlan` |
 | `project_shot_source` | `projectId, shotId` | `{ shot, code, contract, lyricContext, source }`：当前真实 TS 源码与完整引擎契约（ENGI… |
 | `project_shot_update` | `projectId, shotId, expectedInputRevision, patch`（导演制作 acti… | patch 仅允许 `title / prompt / params / lyricPlan`（不含 `locked`，AI 不能改锁）。改 … |
@@ -84,7 +98,7 @@ projects/<uuid>/
 | `project_job_cancel` | `projectId, jobId` | 取消排队或运行中的任务 |
 | `song_cue_sheet` | `projectId` | 按小节的文本节奏表：时间、段落（▶段首）、能量 1–5（小节 rms 在全曲 p5–p95 中的位置）、每拍 2 格鼓点型（`K` kick … |
 | `project_filmstrip` | `projectId` | 一段连续帧拼成一张网格图（≤24 格），每格标 `时间 小节.拍 ●下拍 K S “词”`，下拍帧橙框。范围：`shotId` / `tran… |
-| `project_contact_sheet` | `projectId` | 全片每镜头 1–3 帧（`ratios`，默认 `[0.45]`）拼图，标序号/标题/时间/段落/状态；无源码镜头画占位。看全片一致性、色彩推… |
+| `project_contact_sheet` | `projectId` | 可指定selections=[{shotId,t}]跨镜头时间点（≤120，保序），或全片每镜头1–3帧（ratios默认[0.45]）拼图，… |
 | `project_rhythm_report` | `projectId` | 顺序渲染目标时间段（范围参数同 filmstrip；`sampleFps` 10–60，默认 ≤30 秒用工程帧率、更长用 15），返回文本报… |
 | `craft_guide` | — | shotcraft 技法库节选（≤12k 字符）。`topic`：`shots / transitions / effects / media… |
 | `effect_search` | — | 按风格/用途关键词（risograph、水彩、卡点、glitch、胶片…）、`kind`（`post` 镜头后期 | `transition`… |
@@ -138,6 +152,6 @@ data/*.json 切出，工程服务建工程（指纹导入）时读取。
 
 ### 导演入口与 skill 读取
 
-同一个 agent 完成导演规划、逐镜执行和证据化自评，不要求第二套模型。server `videograph` 0.4.0 的 MCP resources 可读取 `videograph://docs/mcp-guide`、`videograph://skills/shotcraft/SKILL.md`、`videograph://skills/shotcraft/SOURCES.md` 与 shotcraft references；制片 skill 和审片准则分别用 `videograph://skills/videograph-create/SKILL.md`、`videograph://skills/videograph-create/aesthetic-review.md`。导演 prompt 为 `direct_video({projectId})`，只提供流程指导，不能替代工程当前事实。
+同一个 agent 完成导演规划、逐镜执行和证据化自评，不要求第二套模型。当前 MCP resources 可读取 `videograph://docs/mcp-guide`、`videograph://docs/vocal`、`videograph://skills/shotcraft/SKILL.md`、`videograph://skills/shotcraft/SOURCES.md` 与 shotcraft references；制片 skill 和审片准则分别用 `videograph://skills/videograph-create/SKILL.md`、`videograph://skills/videograph-create/aesthetic-review.md`。版本与工具表只维护在 MCP-GUIDE。导演 prompt 为 `direct_video({projectId})`，只提供流程指导，不能替代工程当前事实。
 
 `project_director_get/next` 返回 phase/actions/blockers/review/exportReady 与工程 revision，并返回 active operation 的 `resumable`（actionId/kind/targetId/owner/attemptToken/leaseExpiresAt/expired/receipt/jobIds）。方案、自评使用 `expectedProjectRevision`，目标写入使用目标 `expectedInputRevision`。规划前导演 shots 可空，plan 后用 `project_director_submit` 补齐每镜 subject/action/entrance/exit 再制作。领取 action 的 `id` 作为 actionId，claim 返回 `operation.attemptToken`；镜头 update 只记录 cursorToken，随后 submit 与转场 configure 才形成 receipt，complete 校验真实结果。源码提交后 next 可能只显示验证 action，原制作必须用 resumable 完成；dispatch 只入队已 claim 的确定性验证/审片/export，done 未 complete 的同版本 job 也可复用，不创作源码或调用模型。真实审片证据必须覆盖每镜 stills+filmstrip、非硬切转场 filmstrip、全片 contact-sheet+rhythm，再 `project_review_submit`；签名过期、blocking、技术或人工闸门不通过时不能导出。有限修复预算按目标汇总。分析 retry 仅 failed 状态；patch 仅规划前全层 rhythm/sections，之后需重读确认。完整契约与租约规则见 MCP-GUIDE §6。

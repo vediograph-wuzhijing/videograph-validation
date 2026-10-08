@@ -1,0 +1,22 @@
+.vocal-panel { border-bottom: 1px solid var(--border-default); padding: 16px; }
+.vocal-panel > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
+.vocal-panel > summary span { float: right; font-weight: 400; font-size: 11px; color: var(--text-secondary); }
+.vocal-body { display: grid; gap: 12px; padding-top: 12px; }
+.vocal-body > button { justify-self: start; }
+.vocal-body summary { cursor: pointer; font-size: 12px; }
+.vocal-editor-label { font-size: 12px; }
+.vocal-editor { width: 100%; min-height: 250px; box-sizing: border-box; resize: vertical; font: 12px/1.6 monospace; background: var(--widget); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: 10px; }
+.vocal-aliases { max-height: 140px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.vocal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; }
+.vocal-audition { display: grid; gap: 10px; border-top: 1px solid var(--border-default); padding-top: 12px; font-size: 12px; min-width: 0; }
+.vocal-audition audio { display: block; width: 100%; max-width: 100%; height: 36px; }
+.vocal-pitch-table { overflow-x: auto; margin-top: 8px; }
+.vocal-pitch-table table { width: 100%; border-collapse: collapse; font-size: 11px; text-align: left; }
+.vocal-pitch-table th, .vocal-pitch-table td { padding: 6px 5px; border-bottom: 1px solid var(--border-default); vertical-align: top; }
+.vocal-pitch-table th { color: var(--text-secondary); font-weight: 500; }
+.vocal-imports { display: grid; gap: 10px; padding-top: 10px; min-width: 0; }
+.vocal-imports label { display: grid; gap: 5px; font-size: 12px; }
+.vocal-imports input, .vocal-imports textarea { min-width: 0; width: 100%; box-sizing: border-box; background: var(--widget); border: 1px solid var(--border-default); color: var(--text-primary); border-radius: var(--radius-sm); padding: 8px; }
+.vocal-imports button { justify-self: start; }
+.vocal-import-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+@media(max-width: 600px) { .vocal-import-grid { grid-template-columns: 1fr; } }

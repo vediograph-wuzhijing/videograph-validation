@@ -1,7 +1,7 @@
 // wav.mjs — 16-bit PCM WAV 读写（VOCAL-M1）。M1 管线内部统一 44100Hz 单声道；
 // 读入兼容多声道与 24/32f（混到 mono），写出固定 mono 16-bit（与 OpenUtau Wave.WriteMono16Wav 一致）。
 import { readFileSync, writeFileSync } from 'node:fs';
-import { UstxError } from './ustx.mjs';
+import { UstxError } from './errors.mjs';
 
 const fail = (message) => { throw new UstxError(message); };
 
@@ -12,6 +12,7 @@ function findChunk(view, fourcc, startOffset) {
   while (offset + 8 <= view.byteLength) {
     const id = String.fromCharCode(view.getUint8(offset), view.getUint8(offset + 1), view.getUint8(offset + 2), view.getUint8(offset + 3));
     const size = view.getUint32(offset + 4, true);
+    if (size > view.byteLength - offset - 8) fail(`WAV chunk ${id} is truncated`);
     if (id === fourcc) return { offset: offset + 8, size };
     offset += 8 + size + (size % 2); // chunk 按 2 字节对齐
   }
@@ -19,7 +20,7 @@ function findChunk(view, fourcc, startOffset) {
 }
 
 /**
- * 读 WAV → { sampleRate, channels, samples: Float32Array }（样本归一到 [-1, 1]，多声道已混单声道）。
+ * 读 WAV → { sampleRate, channels, samples: Float32Array }（PCM 归一，多声道混单声道；float 保留余量）。
  * 支持 PCM 8/16/24/32int 与 32f；其他格式明确报错。
  */
 export function readWav(path) {
@@ -40,6 +41,10 @@ export function readWav(path) {
   if (!data) fail(`WAV 缺 data 块: ${path}`);
 
   const bytesPerSample = bitsPerSample / 8;
+  if (!channels || !sampleRate || ![8, 16, 24, 32].includes(bitsPerSample) ||
+      ![1, 3].includes(audioFormat) || (audioFormat === 3 && bitsPerSample !== 32) || data.size % (bytesPerSample * channels) !== 0) {
+    fail(`invalid WAV format or frame alignment: ${path}`);
+  }
   const frameCount = Math.floor(data.size / (bytesPerSample * channels));
   const samples = new Float32Array(frameCount);
   let dataOffset = data.offset;
@@ -58,6 +63,7 @@ export function readWav(path) {
         v = int24 / 8388608;
       } else if (bitsPerSample === 32) v = view.getInt32(pos, true) / 2147483648;
       else fail(`不支持的位深 ${bitsPerSample}: ${path}`);
+      if (!Number.isFinite(v)) fail(`invalid WAV sample: ${path}`);
       sum += v;
     }
     samples[i] = sum / channels;
@@ -83,6 +89,7 @@ export function writeWavMono16(path, samples, sampleRate = SAMPLE_RATE) {
   buffer.write('data', 36, 'ascii');
   buffer.writeUInt32LE(dataBytes, 40);
   for (let i = 0; i < samples.length; i++) {
+    if (!Number.isFinite(samples[i])) fail('mono WAV contains nonfinite samples');
     const clamped = Math.max(-1, Math.min(1, samples[i]));
     buffer.writeInt16LE(Math.round(clamped * 32767), 44 + i * 2);
   }
@@ -105,3 +112,18 @@ export function resampleLinear(samples, fromRate, toRate = SAMPLE_RATE) {
 }
 
 export const WAV_SAMPLE_RATE = SAMPLE_RATE;
+
+/** Float stereo intermediate preserves EQ/makeup headroom until the final limiter. */
+export function writeWavStereoFloat32(path,channels,sampleRate=SAMPLE_RATE){
+  if(channels.length!==2 || channels[0].length!==channels[1].length)fail('stereo WAV requires equal L/R arrays');
+  const frames=channels[0].length,buffer=Buffer.alloc(44+frames*8);
+  buffer.write('RIFF',0);buffer.writeUInt32LE(36+frames*8,4);buffer.write('WAVE',8);buffer.write('fmt ',12);buffer.writeUInt32LE(16,16);
+  buffer.writeUInt16LE(3,20);buffer.writeUInt16LE(2,22);buffer.writeUInt32LE(sampleRate,24);buffer.writeUInt32LE(sampleRate*8,28);
+  buffer.writeUInt16LE(8,32);buffer.writeUInt16LE(32,34);buffer.write('data',36);buffer.writeUInt32LE(frames*8,40);
+  for(let i=0;i<frames;i++)for(let c=0;c<2;c++){
+    const value=channels[c][i];
+    if(!Number.isFinite(value))fail('stereo WAV contains nonfinite samples');
+    buffer.writeFloatLE(value,44+i*8+c*4);
+  }
+  writeFileSync(path,buffer);
+}

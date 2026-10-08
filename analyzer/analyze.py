@@ -286,6 +286,9 @@ def fill_unaligned_lines(texts, aligned, duration):
         index = run_end
     fixed = _monotonic_lines(lines)
     for line in fixed:
+        line["timingSource"] = "estimated" if line.get("fallback") else "audio-aligned"
+        for word in line.get("words", []):
+            word["timingSource"] = line["timingSource"]
         line["end"] = min(line["end"], duration)
         line["start"] = min(line["start"], line["end"])
     return fixed

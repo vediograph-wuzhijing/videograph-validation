@@ -88,7 +88,7 @@ try {
   assert.ok(windowed.data.rhythm.beats.every((t) => t >= 5 && t < 10) && windowed.data.rhythm.beats.length > 0, '时间段过滤（GET 查询参数）');
   assert.equal(windowed.data.audio, undefined, '只返回请求的层');
 
-  const confirmed = await call('song_analysis_confirm', { projectId });
+  const confirmed = await call('song_analysis_confirm', { projectId, expectedInputRevision: (await call('project_get', { projectId })).revision });
   assert.equal(confirmed.status, 'analysis-confirmed');
   assert.equal(confirmed.analysis.confirmedBy, 'mcp');
   log('agent 确认分析 ✓ confirmedBy=mcp');

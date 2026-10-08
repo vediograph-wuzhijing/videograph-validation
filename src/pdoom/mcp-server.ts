@@ -16,6 +16,8 @@ import { feedbackToolDefinitions, feedbackToolNames, callFeedbackTool, mcpToolRe
 import { aeToolDefinitions, aeToolNames, callAeTool } from '../server/mcp-ae-tools.ts';
 import { directorToolDefinitions, directorToolNames, callDirectorTool } from '../server/mcp-director-tools.ts';
 import { fxToolDefinitions, fxToolNames, callFxTool } from '../server/mcp-fx-tools.ts';
+import { vocalToolDefinitions, vocalToolNames, callVocalTool } from '../server/mcp-vocal-tools.ts';
+import { workflowToolDefinitions, workflowToolNames, callWorkflowTool } from '../server/mcp-workflow-tools.ts';
 
 // VideoGraph = LLM 的 After Effects：本 server 是 LLM 操作工程的唯一入口（工具定义见 ../server/mcp-*.ts）。
 // 旧演示视图的 shot_queue_*、shot_cards_*、pdoom_*、lyric_research_draft 工具已于 CLEANUP-01 移除。
@@ -25,11 +27,15 @@ const productRoot = fileURLToPath(new URL('../..', import.meta.url));
 const instructions = [
   'VideoGraph 是 LLM 的 After Effects：你通过这些工具操作本机视频工程，人在审阅室看片、提意见、采用。完整说明见 resource videograph://docs/mcp-guide。',
   '1. 先找已有工程：用户要求修改、继续、重新导出某部片子时，先 project_list（按名称/音频辨认）→ project_get，然后在这个工程上改。只有用户明确要做一部新片才调用 project_create_from_audio；服务对同一音频返回 409 + existingProjects 时改用已有工程。会话里记住并沿用 projectId。',
-  '2. 只改要改的镜头：导出缓存按镜头计（源码哈希 + params + 后期栈 + 镜头素材）。改某一段只对该镜 project_shot_submit / project_shot_update / project_shot_effects；多镜共用一份场景源码时，只把新版本提交给目标镜头，不要把共用文件重新提交给所有镜头（那会让全片重渲）。导出后读 result.cacheSummary 与 reports[].missReason，告诉用户哪些镜头重渲了、为什么。',
+  '2. 先草稿检查/预览：project_draft_check / preview / stills 不产生修订或任务；满意后正式提交。改一个镜头用 project_shot_submit（从共享模块脱离），共享源码更新用 project_scene_module_submit 一次提交所有显式引用镜头，一个修订；不要循环提交同一份代码。导出缓存按源码哈希 + params + 后期栈 + 素材计算，读取 result.cacheSummary 与 missReason。',
   '3. 硬规则：AI 不能接受/采用意见、不能接受审片、不能解锁镜头或转场；409 时重读最新版本再判断，不要原样重试。',
+  '4. 歌声制作：project_vocal_import_midi 生成可核对的假名/声库别名乐谱草稿，或 project_vocal_import_audio 冻结外部处理人声；get → submit → render → project_job_get。实测音高与频段报告不能代替试听。只有人在审阅室采用混音。',
+  '5. 检索与协作：先 scene_component_search/get、effect_search/get 检索基础件、特效和转场；project_feedback_inbox 按 projectId/shotId 读意见。project_filmstrip/contact_sheet 检查连续运动与跨镜头联系表。轮询 project_version_get，变化后分页 project_jobs_get；service_health_get 看代码过期及积压。',
+  '6. 开工必须读 shotcraft/craft_guide 并检索现有特效和基础件；有参考作品先抽帧看画面和运动，再读实现。每轮先读 project_feedback_inbox(status=open)，仅改变化目标，草稿少量静帧通过后提交，默认 project_filmstrip 做连续帧自查。局部示例：start/end 相差2秒、sampleFps=6、columns=6，约12帧；不要同时传shotId/transitionId，时间从实际事件推导。任务done后实际读图，导出前列明无法验证的播放/聆听等项。详见 craft_guide(topic=pv-production)。',
+  '7. OpenUtau/歌声模块是冻结的实验方向，现有模型使用效果尚不可靠；保留既有接口，仅修已确认bug，不主动扩展或重构。技术报告不代表模型可靠制作或人已接受听感。',
 ].join('\n');
 const server = new Server(
-  { name: 'videograph', version: '0.7.0' },
+  { name: 'videograph', version: '0.2.0' },
   { capabilities: { tools: {}, resources: {}, prompts: {} }, instructions },
 );
 
@@ -38,7 +44,7 @@ function textResult(value: unknown, isError = false) {
 }
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [...projectToolDefinitions, ...feedbackToolDefinitions, ...aeToolDefinitions, ...directorToolDefinitions, ...fxToolDefinitions],
+  tools: [...projectToolDefinitions, ...feedbackToolDefinitions, ...aeToolDefinitions, ...directorToolDefinitions, ...fxToolDefinitions, ...vocalToolDefinitions, ...workflowToolDefinitions],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -53,7 +59,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       return textResult({ error: String(error), ...(network ? { hint: '需要能访问 github.com；GitHub API 匿名限额 60 次/小时，可设置 GITHUB_TOKEN' } : {}) }, true);
     }
   }
-  const call = feedbackToolNames.has(name) ? callFeedbackTool
+  if (workflowToolNames.has(name)) {
+    try { const result = await callWorkflowTool(name,args); return 'content' in result ? result : mcpToolResult(result); }
+    catch(error) {return textResult({error:error instanceof Error?error.message:String(error),...(error instanceof ServiceError?{status:error.status,...error.details}:{})},true);}
+  }
+  const call = vocalToolNames.has(name) ? callVocalTool
+    : feedbackToolNames.has(name) ? callFeedbackTool
     : aeToolNames.has(name) ? callAeTool
     : directorToolNames.has(name) ? callDirectorTool
     : projectToolDefinitions.some((tool) => tool.name === name) ? callProjectTool : null;
@@ -68,6 +79,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 // AE-05：技法库与平台指南作为 MCP resources（只读；不暴露仓库其他文件）。
 function resourceList() {
   const entries = [{ uri: 'videograph://docs/mcp-guide', name: 'VideoGraph MCP 使用指南', file: 'docs/MCP-GUIDE.md' },
+    { uri: 'videograph://docs/vocal', name: '歌声合成配置、乐谱与工程接入', file: 'docs/VOCAL.md' },
     { uri: 'videograph://skills/shotcraft/SKILL.md', name: 'shotcraft 技法库总览', file: 'skills/shotcraft/SKILL.md' },
     { uri: 'videograph://skills/shotcraft/SOURCES.md', name: 'shotcraft 来源与许可', file: 'skills/shotcraft/SOURCES.md' },
     { uri: 'videograph://skills/videograph-create/SKILL.md', name: 'AI 导演制作与恢复流程', file: '.agents/skills/videograph-create/SKILL.md' },

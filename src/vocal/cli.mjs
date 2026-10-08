@@ -5,6 +5,8 @@
 //   check-ustx --ustx F         USTX 结构自检
 //   make-ust --ustx F --out G   USTX → 经典 UST（互操作）
 //   render --ustx F --out W     无头渲染人声 WAV（需 resampler + 声库配置）
+//   extract-pitch --audio W --plan P --out P2  从分离人声测出整段 pitd
+//   analyze-pitch --audio W --plan P --out R   实测基频与目标乐谱对比
 // 退出码：0 成功；2 配置缺失；3 输入/渲染错误；1 未预期。--json 输出机器可读报告。
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve, isAbsolute } from 'node:path';
@@ -15,6 +17,10 @@ import { buildUstx, serializeUstx, validateUstxText, UstxError } from './ustx.mj
 import { ustxTextToUst } from './ust.mjs';
 import { loadVoicebank } from './oto.mjs';
 import { renderUstx } from './render.mjs';
+import { extractReferencePitch, pitchReport } from './pitch-analysis.mjs';
+import { readWav } from './wav.mjs';
+import { readMidi, midiScore } from './midi.mjs';
+import { japaneseMora, japaneseAliases } from './japanese.mjs';
 
 const EXIT = { OK: 0, UNEXPECTED: 1, CONFIG: 2, INPUT: 3 };
 
@@ -66,6 +72,28 @@ function resolveResamplerOption(value) {
 
 try {
   switch (command) {
+    case 'import-midi': {
+      const midi=readMidi(readFileSync(asPath(args.midi,'midi')));
+      const lyrics=args.lyrics ? japaneseMora(readFileSync(asPath(args.lyrics,'lyrics'),'utf8')) : args['lyrics-json'] ? JSON.parse(readFileSync(asPath(args['lyrics-json'],'lyrics-json'),'utf8')) : undefined;
+      const result=midiScore(midi,{trackIndex:args.track===undefined?undefined:Number(args.track),channel:args.channel===undefined?undefined:Number(args.channel),tempo:Number(args.tempo??120),lyrics});
+      if(args.bank){const aliases=japaneseAliases(result.plan.parts[0].notes,loadVoicebank(asPath(args.bank,'bank')),{mode:args['alias-mode']??'auto',prefix:args.prefix??'',suffix:args.suffix??''});result.plan.parts[0].notes=aliases.notes;result.aliasReport=aliases.report;if(!aliases.report.ready) throw new UstxError(JSON.stringify(aliases.report.missing));}
+      const output=asPath(args.out,'out');writeFileSync(output,JSON.stringify(result.plan,null,2));writeFileSync(`${output}.report.json`,JSON.stringify(result,null,2));out({ok:true,out:output,report:result.report},`已写出 MIDI 乐谱：${output}`);break;
+    }
+    case 'extract-pitch':
+    case 'analyze-pitch': {
+      const audioPath=asPath(args.audio,'audio'),planPath=asPath(args.plan,'plan'),output=asPath(args.out,'out');
+      const plan=JSON.parse(readFileSync(planPath,'utf8')),audio=readWav(audioPath);
+      if(command==='extract-pitch'){
+        const result=extractReferencePitch(audio,plan,{offsetMs:Number(args['offset-ms'] ?? 0),minConfidence:Number(args['min-confidence'] ?? 0.85),maxDeviationCents:Number(args['max-deviation'] ?? 600),toleranceCents:Number(args['curve-tolerance'] ?? 2)});
+        writeFileSync(output,JSON.stringify(result.plan,null,2));
+        const reportPath=`${output}.report.json`;writeFileSync(reportPath,JSON.stringify(result.report));
+        out({ok:true,out:output,reportPath,acceptedFrames:result.report.acceptedFrames,rejectedFrames:result.report.diagnostics.length},`已写出整段 pitd：${output}，质检：${reportPath}`);
+      }else{
+        const report=pitchReport(audio,serializeUstx(buildUstx(plan)));writeFileSync(output,JSON.stringify(report));
+        out({ok:true,out:output,...report.summary},`已写出实测音高报告：${output}`);
+      }
+      process.exit(EXIT.OK);break;
+    }
     case 'check': {
       const config = resolveConfig({ projectRoot: process.cwd() });
       let bank = null;
@@ -178,7 +206,7 @@ try {
     }
 
     default:
-      fail(`未知命令: ${command ?? '（空）'}。可用：check / make-ustx / check-ustx / make-ust / render`, EXIT.INPUT);
+      fail(`未知命令: ${command ?? '（空）'}。可用：check / make-ustx / check-ustx / make-ust / render / extract-pitch / analyze-pitch`, EXIT.INPUT);
   }
 } catch (err) {
   fail(err.message, err instanceof UstxError ? EXIT.INPUT : EXIT.UNEXPECTED, args.json ? { stack: err.stack } : {});

@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { projectAnalysisFile, projectManifestFile, projectDataRoot } from '../../../src/server/project-generation.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'videograph-director-song-'));
 process.env.VIDEOGRAPH_PROJECTS = join(root, 'projects');
@@ -151,15 +152,15 @@ function draft() {
 }
 const json = (path) => JSON.parse(readFileSync(path, 'utf8'));
 function files(id) {
-  const dir = store.projectDir(id);
-  return ['analysis/analysis-v2.json', 'engine/data/audio.json', 'engine/data/lyrics.json', 'engine-manifest.json'].map((file) => readFileSync(join(dir, file), 'utf8'));
+  const dir = store.projectDir(id), project = store.readProject(id), data = projectDataRoot(dir, project);
+  return [projectAnalysisFile(dir, project), join(data, 'audio.json'), join(data, 'lyrics.json'), projectManifestFile(dir, project)].map((file) => readFileSync(file, 'utf8'));
 }
 
 test('rhythm/sections replacement preserves originals, derives engine/song and revokes confirmation', () => {
   assert.equal(typeof song.patchSongAnalysis, 'function');
   const initial = draft();
   const confirmed = song.confirmSongAnalysis(initial.id, 'mcp');
-  const original = json(join(store.projectDir(initial.id), 'analysis/analysis-v2.json'));
+  const original = json(projectAnalysisFile(store.projectDir(initial.id), initial));
   const patch = {
     rhythm: { bpm: 100, beatPeriod: 0.6, beats: [0.1, 0.7, 1.3, 1.9, 2.5, 3.1], downbeats: [0.1, 2.5], meter: 4, confidence: 1 },
     sections: [{ start: 0, end: 4, name: 'intro' }, { start: 4, end: 10, name: 'chorus' }],
@@ -176,7 +177,7 @@ test('rhythm/sections replacement preserves originals, derives engine/song and r
   assert.deepEqual(corrected.song.sections, patch.sections);
   assert.notEqual(corrected.engineHash, confirmed.engineHash);
   const dir = store.projectDir(initial.id);
-  const stored = json(join(dir, 'analysis/analysis-v2.json'));
+  const stored = json(projectAnalysisFile(dir, corrected));
   assert.equal(stored.overrides.length, 2);
   for (const [index, layer] of ['rhythm', 'sections'].entries()) {
     const override = stored.overrides[index];
@@ -189,14 +190,14 @@ test('rhythm/sections replacement preserves originals, derives engine/song and r
   }
   assert.deepEqual(stored.lyrics, original.lyrics);
   assert.deepEqual(stored.onsets, original.onsets);
-  const engine = json(join(dir, 'engine/data/audio.json'));
+  const engine = json(join(projectDataRoot(dir, corrected), 'audio.json'));
   assert.equal(engine.bpm, 100);
   assert.equal(engine.beat_period, 0.6);
   assert.deepEqual(engine.beats, patch.rhythm.beats);
   assert.deepEqual(engine.sections, patch.sections);
   assert.throws(() => song.submitPlan(initial.id, corrected.revision), (error) => error.status === 409);
   const next = song.patchSongAnalysis(initial.id, corrected.revision, { sections: [{ start: 0, end: 10, name: 'verse' }] }, 'human');
-  const twice = json(join(dir, 'analysis/analysis-v2.json'));
+  const twice = json(projectAnalysisFile(dir, next));
   assert.equal(twice.overrides.length, 3);
   assert.equal(twice.overrides[2].author, 'human');
   assert.deepEqual(twice.overrides[2].patch.before.data, stored.sections);

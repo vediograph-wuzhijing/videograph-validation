@@ -1,17 +1,17 @@
 // resampler.mjs — 重采样器命令行契约调用（VOCAL-M1/M2）。
 // 两种契约变体（contract 配置选择，默认 classic）：
 //   classic  — 经典 UTAU 契约（worldline.exe 等独立重采样器）：
-//              <input> <output> <音名> <velocity> <flags> <offset> <durRequired> <fixed/consonant> <end_blank/cutoff> <volume> <modulation> [<pitch bend>]
-//              无 tempo 段；音高弯曲为可选末参，平直音高省略（worldline 内置 f0 分析，不需要 frq）。
+//              <input> <output> <音名> <velocity> <flags> <offset> <durRequired> <fixed/consonant> <end_blank/cutoff> <volume> <modulation> [<!tempo> <pitch bend>]
+//              平直音高可省略扩展；非零曲线必须带 !tempo + int12（13参）。12参在worldline静默失效。
 //   openutau — OpenUtau/moresampler 扩展契约（对齐 ExeResampler.cs，2026-10-06 核对）：
 //              同前 11 参 + `!tempo` + base64pitches(int12)。
 // resampler 配置：exe 路径字符串，或 argv 头数组（["node","stub.mjs"]，包装脚本/测试用）。
 // 坑位备忘：.bat/.cmd 不能被 execFile 直接执行，请用 exe 或 argv 头数组包一层。
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import { toneToName } from './ustx.mjs';
 
-const PITCH_CADENCE_MS = 5; // 音高数组采样密度（与 OpenUtau 渲染粒度一致的近似，M3 精确对齐）
+const PITCH_CADENCE_MS = 5; // Legacy flat-array helper default; synthesis uses pitchCadenceMs(tempo).
 
 export const RESAMPLER_CONTRACTS = ['classic', 'openutau'];
 
@@ -39,7 +39,7 @@ export function encodePitchesInt12(pitches) {
   return out;
 }
 
-/** 平直音高 → 全 0 音分数组（M1 无音高曲线渲染时的近似；pitchCurve 支持属 M3）。 */
+/** Flat-array convenience helper; pass the desired cadence explicitly. */
 export function flatPitches(durationMs, cadenceMs = PITCH_CADENCE_MS) {
   return new Array(Math.max(1, Math.ceil(durationMs / cadenceMs) + 1)).fill(0);
 }
@@ -64,7 +64,7 @@ export function buildResamplerArgs(item) {
   }
   const pitches = item.pitches ?? [];
   const hasBend = pitches.length > 0 && pitches.some((p) => p !== 0);
-  return hasBend ? [...base, encodePitchesInt12(pitches)] : base;
+  return hasBend ? [...base, `!${item.tempo ?? 120}`, encodePitchesInt12(pitches)] : base;
 }
 
 /**
@@ -74,11 +74,14 @@ export function buildResamplerArgs(item) {
  *         pitches=[], contract='classic' }
  * 输出文件不存在视为失败（契约要求重采样器写出文件）。
  */
-export function callResampler(item, { timeoutMs = 120_000 } = {}) {
+export function callResampler(item, { timeoutMs = 120_000, signal } = {}) {
+  signal?.throwIfAborted();
   const args = buildResamplerArgs(item);
   const argvHead = Array.isArray(item.resampler) ? item.resampler : [item.resampler];
+  // A successful process that writes nothing must never reuse a previous note's output.
+  if (existsSync(item.outputWav)) unlinkSync(item.outputWav);
   return new Promise((resolve, reject) => {
-    execFile(argvHead[0], [...argvHead.slice(1), ...args], { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(argvHead[0], [...argvHead.slice(1), ...args], { timeout: timeoutMs, windowsHide: true, signal }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error(`重采样器执行失败（${argvHead.join(' ')}）：${err.message}\nstdout: ${stdout ?? ''}\nstderr: ${stderr ?? ''}`));
         return;

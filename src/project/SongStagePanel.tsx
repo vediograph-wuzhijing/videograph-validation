@@ -35,6 +35,7 @@ export function SongStagePanel({ project, busy, onProject, onAction }: { project
       <button className="action-button" disabled={busy} onClick={() => void onAction(async () => onProject(await projectApi<VideoProject>(`/projects/${project.id}/song/analysis/retry`, { expectedRevision: project.revision })))}>重新分析</button>
     </>}
     {analysisError && <p className="song-stage-error" role="alert">无法读取分析摘要：{analysisError}</p>}
+    {project.analysisQuality?.warnings.map(text=><p className="song-stage-error" role="status" key={text}>{text}</p>)}
     {summary && <dl className="song-stage-facts">
       <dt>时长</dt><dd>{summary.data.audio?.duration?.toFixed(2) ?? '未知'}s</dd>
       <dt>BPM</dt><dd>{rhythm?.bpm?.toFixed(2) ?? '变速'}</dd>
@@ -45,7 +46,7 @@ export function SongStagePanel({ project, busy, onProject, onAction }: { project
     {lines.length > 0 && <ol className="song-stage-lyrics">{lines.slice(0, 40).map((line, index) => <li key={index}><span>{line.start.toFixed(2)}</span>{line.text}</li>)}</ol>}
     {status === 'analysis-draft' && <>
       <p className="project-note">核对节拍、段落和歌词后确认；确认后才能规划镜头。agent 也可以通过 MCP 确认（会记为 agent 确认）。</p>
-      <button className="action-button" disabled={busy || !current} onClick={() => void onAction(async () => onProject(await projectApi<VideoProject>(`/projects/${project.id}/song/analysis/confirm`, { expectedRevision: project.revision })))}>确认分析</button>
+      <button className="action-button" disabled={busy || !current || project.analysisQuality?.blocked} onClick={() => void onAction(async () => onProject(await projectApi<VideoProject>(`/projects/${project.id}/song/analysis/confirm`, { expectedRevision: project.revision })))}>确认分析</button>
     </>}
     {status === 'analysis-confirmed' && <>
       <p className="project-note">确认人：{project.analysis.confirmedBy === 'mcp' ? 'agent（MCP）' : '人工'}。等待 agent 用 project_plan_submit 按歌词/段落规划镜头；也可以先用兜底规划（每段一镜，标注为非 AI 创作）。</p>

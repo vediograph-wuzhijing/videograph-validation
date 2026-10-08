@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync, mkdir
 import { join, dirname, resolve } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { hashFileAsync, renameRetry } from '../platform/files.mjs';
 
 const productRoot = fileURLToPath(new URL('../..', import.meta.url));
 const sha256 = (data) => createHash('sha256').update(data).digest('hex');
@@ -19,7 +20,6 @@ function condaEnvPython(name) {
   if (process.env.CONDA_PREFIX) bases.push(/[\\/]envs[\\/][^\\/]+[\\/]?$/.test(process.env.CONDA_PREFIX) ? resolve(process.env.CONDA_PREFIX, '..', '..') : process.env.CONDA_PREFIX);
   if (process.env.CONDA_EXE) bases.push(resolve(dirname(process.env.CONDA_EXE), '..'));
   for (const dir of ['anaconda3', 'miniconda3', 'miniforge3']) bases.push(join(homedir(), dir));
-  bases.push('D:/Users/Martis/anaconda3'); // 作者机的安装位置：只是最后一个探测项
   let found = bases.map((base) => join(base, 'envs', name, exe)).find((path) => existsSync(path)) ?? null;
   if (!found) {
     const listed = spawnSync('conda', ['env', 'list', '--json'], { encoding: 'utf8', windowsHide: true, timeout: 15000, shell: process.platform === 'win32' });
@@ -67,7 +67,7 @@ export async function runAnalysis({ audioPath, stages = ['t0', 't1', 't3'], lyri
   const splitT3 = needsT3 && t3Python !== python && resolve(t3Python) !== resolve(python);
   if (splitT3 && !baseStages.includes('t0')) baseStages.unshift('t0');
   if (splitT3 && !baseStages.includes('assemble')) baseStages.push('assemble');
-  const audioHash = sha256(readFileSync(audioPath));
+  const audioHash = await hashFileAsync(audioPath);
   const params = {
     language: language ?? null, gpu, title: title ?? null, asr: asr ?? null,
     lyricsHash: lyricsText == null ? null : sha256(lyricsText),
@@ -103,9 +103,9 @@ export async function runAnalysis({ audioPath, stages = ['t0', 't1', 't3'], lyri
     if (!existsSync(produced)) throw new Error('analysis-v2.json 缺失');
     const analysis = JSON.parse(readFileSync(produced, 'utf8'));
     mkdirSync(cacheRoot, { recursive: true });
-    const temporary = join(cacheRoot, `.${key}.tmp`);
+    const temporary = join(cacheRoot, `.${key}.${process.pid}.${Date.now()}.tmp`);
     writeFileSync(temporary, JSON.stringify(analysis), 'utf8');
-    renameSync(temporary, cached);
+    await renameRetry(temporary, cached);
     return { cached: false, key, analysis, file: cached, log: output };
   } finally {
     rmSync(work, { recursive: true, force: true });

@@ -4,16 +4,15 @@
 //   UTrack.cs、UPart.cs、Util/Yaml.cs（UnderscoredNamingConvention + OmitNull）、Util/NotePresets.cs。
 // 引擎加载端 IgnoreUnmatchedProperties：多写字段无害，少写必要字段会在 Validate 时补默认值。
 import { emitYaml, parseYaml, YamlError } from './yaml-lite.mjs';
+import { UstxError } from './errors.mjs';
+import { validatePoints, range, SHAPES } from './expressions.mjs';
+export { UstxError } from './errors.mjs';
 
 export const USTX_VERSION = '0.10';
 export const TICKS_PER_BEAT = 480; // UProject.resolution 固定 480，不序列化
 // NotePresets.Default：PortamentoPreset("Standard", 80, -40)、VibratoPreset("Standard", 75, 175, 25, 10, 10, 0, 0, 0)
 export const PORTAMENTO = { startMs: -40, lengthMs: 80 };
 export const VIBRATO_DEFAULT = { length: 0, period: 175, depth: 25, in: 10, out: 10, shift: 0, drift: 0, volLink: 0 };
-
-export class UstxError extends Error {
-  constructor(message) { super(message); this.name = 'UstxError'; }
-}
 
 const fail = (message) => { throw new UstxError(message); };
 
@@ -106,37 +105,38 @@ function startTickOf(note, index) {
 
 function buildPitchPoints(note, index) {
   if (note.pitchCurve === undefined) {
-    // 默认滑音：Standard 预设（-40ms 回望 → 80ms 到位），平直音高。
+    // Standard: -40ms start, 80ms span. snap_first supplies the adjacent tone.
     return {
       data: [
         { x: PORTAMENTO.startMs, y: 0, shape: 'sp' },
-        { x: PORTAMENTO.lengthMs, y: 0, shape: 'io' },
+        { x: PORTAMENTO.startMs + PORTAMENTO.lengthMs, y: 0, shape: 'io' },
       ],
       snap_first: true,
     };
   }
   if (!Array.isArray(note.pitchCurve) || note.pitchCurve.length === 0) fail(`notes[${index}].pitchCurve 必须是非空数组`);
+  validatePoints(note.pitchCurve, { label: `notes[${index}].pitchCurve`, limit: 2000 });
   let lastX = -Infinity;
   const data = note.pitchCurve.map((p, i) => {
     if (typeof p.x !== 'number') fail(`notes[${index}].pitchCurve[${i}].x 必须是数字（毫秒，相对音符起点）`);
     if (typeof p.y !== 'number') fail(`notes[${index}].pitchCurve[${i}].y 必须是数字（0.1 半音，相对音符音高）`);
     const shape = p.shape ?? 'io';
-    if (!['io', 'lin', 'i', 'o', 'sp'].includes(shape)) fail(`notes[${index}].pitchCurve[${i}].shape 非法: ${shape}`);
+    if (!SHAPES.includes(shape)) fail(`notes[${index}].pitchCurve[${i}].shape 非法: ${shape}`);
     if (p.x <= lastX) fail(`notes[${index}].pitchCurve 的 x 必须严格递增`);
     lastX = p.x;
-    return { x: p.x, y: p.y, shape };
+    return { x: p.x, y: p.y, shape: shape === 'lin' ? 'l' : shape };
   });
   return { data, snap_first: note.snapFirst ?? true };
 }
 
 function buildVibrato(note, index) {
   const v = note.vibrato ?? {};
-  if (typeof v !== 'object' || Array.isArray(v)) fail(`notes[${index}].vibrato 必须是对象`);
+  if (!v || typeof v !== 'object' || Array.isArray(v)) fail(`notes[${index}].vibrato 必须是对象`);
   const length = v.length ?? VIBRATO_DEFAULT.length;
-  if (typeof length !== 'number' || length < 0 || length > 100) fail(`notes[${index}].vibrato.length 超出 0..100`);
+  range(length, 0, 100, `notes[${index}].vibrato.length`);
   const clamp = (value, lo, hi, label) => {
     const n = value ?? VIBRATO_DEFAULT[label];
-    if (typeof n !== 'number' || n < lo || n > hi) fail(`notes[${index}].vibrato.${label} 超出 ${lo}..${hi}`);
+    range(n, lo, hi, `notes[${index}].vibrato.${label}`);
     return n;
   };
   return {
@@ -211,6 +211,9 @@ export function buildUstx(plan) {
         lyric: src.lyric,
         pitch: buildPitchPoints(src, ni),
         vibrato: buildVibrato(src, ni),
+        phoneme_expressions: Object.entries({ vol: src.volume, vel: src.velocity, atk: src.attack, dec: src.decay })
+          .filter(([,v]) => v !== undefined).map(([abbr,value]) => ({ index: 0, abbr, value: range(value,0,abbr==='dec'?100:200,abbr) })),
+        ...(src.envelope ? { videograph_envelope: src.envelope } : {}),
       };
     });
     const duration = Math.max(lastEnd - partPosition, TICKS_PER_BEAT);
@@ -221,7 +224,14 @@ export function buildUstx(plan) {
       position: partPosition,
       duration,
       notes,
-      curves: [],
+      curves: [['pitchDeviation','pitd','cents',-1200,1200,1], ['dynamics','dyn','db',-24,12,10]].flatMap(([field,abbr,y,minY,maxY,scale]) => {
+        if (part[field] === undefined) return [];
+        validatePoints(part[field], { x:'timeMs', y, minX:0, minY, maxY, label:field, allowShape:false });
+        // Time-based API -> USTX ticks relative to part; negative xs cover its preutter.
+        const points=part[field].map((p)=>[Math.round(p.timeMs*tempo*480/60000)-partPosition,Math.round(p[y]*scale)]);
+        const unique=new Map(points); // Multiple sub-tick observations resolve to the last value.
+        return [{abbr,xs:[...unique.keys()],ys:[...unique.values()]}];
+      }),
       masked_curves: [],
     };
   });
@@ -268,8 +278,11 @@ export function validateUstxText(text) {
     return { ok: false, errors: ['顶层必须是映射'] };
   }
   if (project.ustx_version !== USTX_VERSION) errors.push(`ustx_version 应为 ${USTX_VERSION}，实际 ${JSON.stringify(project.ustx_version)}`);
-  if (!Array.isArray(project.tempos) || project.tempos.length === 0 || project.tempos[0].position !== 0) {
+  if (!Array.isArray(project.tempos) || project.tempos.length === 0 || project.tempos[0]?.position !== 0) {
     errors.push('tempos 缺失或首项 position 非 0');
+  }
+  for (const [i, tempo] of (Array.isArray(project.tempos) ? project.tempos : []).entries()) {
+    if (!tempo || !Number.isFinite(tempo.bpm) || tempo.bpm <= 0 || !Number.isSafeInteger(tempo.position) || tempo.position < 0) errors.push(`tempos[${i}] 非法`);
   }
   if (!Array.isArray(project.time_signatures) || project.time_signatures.length === 0) errors.push('time_signatures 缺失');
   if (!Array.isArray(project.tracks) || project.tracks.length === 0) errors.push('tracks 缺失');
@@ -280,6 +293,8 @@ export function validateUstxText(text) {
   if (parts.length === 0) errors.push('voice_parts 缺失');
   const trackCount = Array.isArray(project.tracks) ? project.tracks.length : 0;
   for (const [pi, part] of parts.entries()) {
+    if (!part || typeof part !== 'object' || Array.isArray(part)) { errors.push(`voice_parts[${pi}] 必须是映射`); continue; }
+    if (!Number.isSafeInteger(part.position) || part.position < 0) errors.push(`voice_parts[${pi}].position 非法`);
     if (!Number.isInteger(part.track_no) || part.track_no < 0 || part.track_no >= trackCount) {
       errors.push(`voice_parts[${pi}].track_no 越界`);
     }
@@ -288,8 +303,9 @@ export function validateUstxText(text) {
     let lastEnd = -Infinity;
     for (const [ni, note] of notes.entries()) {
       const label = `voice_parts[${pi}].notes[${ni}]`;
+      if (!note || typeof note !== 'object' || Array.isArray(note)) { errors.push(`${label} 必须是映射`); continue; }
       if (typeof note.lyric !== 'string' || note.lyric === '') errors.push(`${label}.lyric 缺失`);
-      if (!Number.isInteger(note.position) || !Number.isInteger(note.duration) || note.duration <= 0) {
+      if (!Number.isSafeInteger(note.position) || note.position < 0 || !Number.isSafeInteger(note.duration) || note.duration <= 0) {
         errors.push(`${label} 的 position/duration 非法`);
       } else if (note.position < lastEnd) errors.push(`${label} 与前一音符重叠`);
       if (lastEnd > -Infinity) lastEnd = Math.max(lastEnd, note.position + note.duration);
@@ -297,12 +313,34 @@ export function validateUstxText(text) {
       if (!Number.isInteger(note.tone) || note.tone < 0 || note.tone > 127) errors.push(`${label}.tone 越界`);
       const points = note.pitch && Array.isArray(note.pitch.data) ? note.pitch.data : [];
       if (points.length === 0) errors.push(`${label}.pitch.data 为空`);
+      try {
+        validatePoints(points, {label:`${label}.pitch.data`,limit:2000});
+        if(note.videograph_envelope !== undefined){
+          validatePoints(note.videograph_envelope,{label:`${label}.envelope`,minY:0,maxY:400,limit:5,allowShape:false});
+          if(note.videograph_envelope.length!==5 || note.videograph_envelope[0].y!==0 || note.videograph_envelope.at(-1).y!==0 || note.videograph_envelope[0].x>0 || note.videograph_envelope.at(-1).x<=0)
+            fail(`${label}.envelope 需要5点且首尾音量为0`);
+        }
+        for(const e of note.phoneme_expressions ?? []) {
+          if(!e || e.index!==0 || !['vol','vel','atk','dec'].includes(e.abbr))fail(`${label} 不支持此 phoneme expression`);
+          range(e.value,0,e.abbr==='dec'?100:200,`${label}.${e.abbr}`);
+        }
+        if((note.vibrato?.vol_link ?? 0)!==0)fail(`${label} 尚不支持 vibrato.vol_link`);
+      }catch(e){errors.push(e.message);}
       const vib = note.vibrato;
       if (vib) {
-        if (typeof vib.length !== 'number' || vib.length < 0 || vib.length > 100) errors.push(`${label}.vibrato.length 越界`);
-        if (typeof vib.period !== 'number' || vib.period < 5 || vib.period > 500) errors.push(`${label}.vibrato.period 越界`);
-        if (typeof vib.depth !== 'number' || vib.depth < 5 || vib.depth > 200) errors.push(`${label}.vibrato.depth 越界`);
+        for(const [key,lo,hi] of [['length',0,100],['period',5,500],['depth',5,200],['in',0,100],['out',0,100],['shift',0,100],['drift',-100,100]]) {
+          try{range(vib[key] ?? VIBRATO_DEFAULT[key],lo,hi,`${label}.vibrato.${key}`);}catch(e){errors.push(e.message);}
+        }
       }
+    }
+    const seen=new Set();
+    for(const c of part.curves ?? []) {
+      try{
+        if(!c || !['pitd','dyn'].includes(c.abbr) || seen.has(c.abbr))fail(`part.curves 不支持/重复的曲线 ${c?.abbr}`);
+        seen.add(c.abbr);
+        if(!Array.isArray(c.xs) || !Array.isArray(c.ys) || c.xs.length!==c.ys.length)fail(`${c.abbr} xs/ys 长度不同`);
+        validatePoints(c.xs.map((x,i)=>({x,y:c.ys[i]})),{label:c.abbr,minX:-28800000,maxX:28800000,minY:c.abbr==='pitd'?-1200:-240,maxY:c.abbr==='pitd'?1200:120});
+      }catch(e){errors.push(e.message);}
     }
   }
   return { ok: errors.length === 0, errors };

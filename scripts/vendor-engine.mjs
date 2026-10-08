@@ -1,0 +1,20 @@
+// Explicit maintainer operation: copy licensed runtime assets, never song data.
+import {cpSync,copyFileSync,mkdirSync,readFileSync,writeFileSync,readdirSync} from 'node:fs';
+import {resolve,join,relative} from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
+const product=fileURLToPath(new URL('..',import.meta.url)),source=resolve(process.argv[2]??join(product,'../pdoom-video')),target=join(product,'engine-base/runtime');
+const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
+if(!readFileSync(join(source,'LICENSE'),'utf8').startsWith('MIT License')) throw new Error('reference runtime must have a verified MIT license');
+mkdirSync(join(target,'app/src'),{recursive:true});mkdirSync(join(target,'docs'),{recursive:true});
+cpSync(join(source,'app/src/engine'),join(target,'app/src/engine'),{recursive:true});
+copyFileSync(join(source,'app/src/main.ts'),join(target,'app/src/main.ts'));
+cpSync(join(source,'app/public/fonts'),join(target,'app/public/fonts'),{recursive:true});
+copyFileSync(join(source,'LICENSE'),join(target,'LICENSE'));
+copyFileSync(join(source,'docs/ENGINE.md'),join(target,'docs/ENGINE.md'));
+const html=readFileSync(join(source,'app/index.html'),'utf8').replace("I'm Upping My P(doom)",'VideoGraph Preview');writeFileSync(join(target,'app/index.html'),html);
+const walk=dir=>readdirSync(dir,{withFileTypes:true}).flatMap(e=>e.isDirectory()?walk(join(dir,e.name)):[{file:relative(target,join(dir,e.name)).replaceAll('\\','/'),sha256:sha(readFileSync(join(dir,e.name)))}]);
+const files=walk(target).filter(f=>f.file!=='manifest.json');
+writeFileSync(join(target,'manifest.json'),JSON.stringify({schema:'engine-base/v1',version:'0.2.0',origin:'pdoom-video',license:'MIT; fonts SIL-OFL-1.1 / public domain per upstream README',files},null,2));
+writeFileSync(join(target,'CREDITS.md'),'# Engine runtime credits\n\nEngine code: pdoom-video, MIT; see LICENSE. Font families Archivo, Cormorant Garamond, IBM Plex Mono: SIL Open Font License. Single-stroke EMS/Hershey assets: upstream identifies OFL/public domain. Source font license: app/public/fonts/src/OFL.txt. No original song, lyrics, analysis, scenes or rendered plates are included.\n');
+console.log(JSON.stringify({files:files.length,bytes:files.reduce((n,f)=>n+readFileSync(join(target,f.file)).length,0)}));

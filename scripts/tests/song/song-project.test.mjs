@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'no
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { projectDataRoot, projectAnalysisFile, projectManifestFile } from '../../../src/server/project-generation.mjs';
 
 const root = mkdtempSync(join(tmpdir(), 'videograph-song-project-'));
 process.env.VIDEOGRAPH_PROJECTS = join(root, 'projects');
@@ -47,13 +48,26 @@ test('非参考音频 → analysis-pending 新歌工程：通用引擎快照，�
   assert.equal(JSON.stringify(project).includes('第一句歌词'), false, '歌词原文不进工程快照');
   const engine = join(process.env.VIDEOGRAPH_PROJECTS, project.id, 'engine');
   assert.ok(existsSync(join(engine, project.audio.engineFile)));
-  assert.ok(existsSync(join(engine, 'app/src/scenes/hook.ts')), '通用场景保留');
+  assert.ok(existsSync(join(engine, 'app/src/engine/engine.ts')), '随包通用引擎保留');
+  assert.equal(existsSync(join(engine, 'app/public/plates')), false, '不分发参考作品的渲染底图');
   assert.ok(existsSync(join(engine, 'app/src/scenes/_window-template.ts')));
   for (const bound of ['open', 'room', 'loom', 'paperclips']) assert.equal(existsSync(join(engine, `app/src/scenes/${bound}.ts`)), false, `${bound} 绑定原曲歌词，不应进入`);
   assert.doesNotMatch(readFileSync(join(engine, 'app/src/timeline.ts'), 'utf8'), /ly\.get\(/);
   assert.equal(existsSync(join(engine, 'data/lyrics.json')), false, '分析完成前没有任何歌词数据');
   assert.ok(store.listProjects().some((entry) => entry.id === project.id && entry.status === 'analysis-pending' && entry.duration === null), 'listProjects 不因缺少 song 崩溃');
   assert.equal(song.analysisInput(project.id).lyricsText, '第一句歌词\n第二句歌词');
+});
+
+test('多数行估算时间不能确认；校正后恢复正常确认，保留来源证据',()=>{
+  let project=store.createProjectFromAudio(audioFile(),'alignment quality fixture');
+  const raw=analysis();raw.audio.hash=project.audio.hash;
+  raw.lyrics.lines.forEach(line=>{line.fallback=true;line.timingSource='estimated';line.words.forEach(word=>word.timingSource='estimated');});
+  project=song.completeAnalysis(project.id,raw);assert.equal(project.analysisQuality.blocked,true);
+  assert.throws(()=>song.confirmSongAnalysis(project.id,'mcp',project.revision),error=>error.status===422);
+  assert.throws(()=>song.confirmSongAnalysis(project.id,'human',project.revision),error=>error.status===422);
+  const corrected=structuredClone(raw.lyrics);corrected.timingSource='manual';corrected.lines.forEach(line=>{delete line.fallback;line.timingSource='manual';line.words.forEach(word=>word.timingSource='manual');});
+  project=song.submitSongLyrics(project.id,project.revision,corrected,'human');assert.equal(project.analysisQuality.blocked,false);
+  project=song.confirmSongAnalysis(project.id,'human',project.revision);assert.equal(project.status,'analysis-confirmed');
 });
 
 test('参数校验：stages 必须含 t1，非法阶段拒绝', () => {
@@ -77,8 +91,8 @@ test('分析任务：成功写入草稿与引擎数据；失败转 analysis-fail
   assert.equal(draft.song.lines.length, 2);
   assert.match(draft.engineHash, /^[0-9a-f]{64}$/);
   const engine = join(process.env.VIDEOGRAPH_PROJECTS, project.id, 'engine');
-  assert.equal(JSON.parse(readFileSync(join(engine, 'data/audio.json'), 'utf8')).bpm, 120);
-  assert.equal(JSON.parse(readFileSync(join(engine, 'data/lyrics.json'), 'utf8')).lines.length, 2);
+  assert.equal(JSON.parse(readFileSync(join(projectDataRoot(store.projectDir(project.id), draft), 'audio.json'), 'utf8')).bpm, 120);
+  assert.equal(JSON.parse(readFileSync(join(projectDataRoot(store.projectDir(project.id), draft), 'lyrics.json'), 'utf8')).lines.length, 2);
   assert.throws(() => song.completeAnalysis(project.id, analysis()), /analysis-pending/, '草稿不会被重复写入覆盖');
 });
 
@@ -122,7 +136,12 @@ test('歌词修正：经契约校验、刷新派生数据，确认后再改退�
   const project = await draftProject();
   const confirmed = song.confirmSongAnalysis(project.id, 'mcp');
   const lyrics = { lines: [{ text: '改过的歌词', start: 2, end: 4, words: [{ w: '改过的', start: 2, end: 3 }, { w: '歌词', start: 3, end: 4 }] }] };
+  const dir = store.projectDir(project.id);
+  const persisted = [projectAnalysisFile(dir, confirmed), join(projectDataRoot(dir, confirmed), 'lyrics.json'), projectManifestFile(dir, confirmed)];
+  const originalFiles = persisted.map((file) => readFileSync(file));
   assert.throws(() => song.submitSongLyrics(project.id, confirmed.revision - 1, lyrics), /重新读取/);
+  persisted.forEach((file, i) => assert.deepEqual(readFileSync(file), originalFiles[i]));
+  assert.throws(() => song.confirmSongAnalysis(project.id, 'human', confirmed.revision - 1), (error) => error.status === 409);
   assert.throws(() => song.submitSongLyrics(project.id, confirmed.revision, { lines: [{ text: 'x', start: 9, end: 20, words: [] }] }), (error) => error.status === 400);
   const next = song.submitSongLyrics(project.id, confirmed.revision, lyrics, 'mcp');
   assert.equal(next.status, 'analysis-draft');
@@ -159,7 +178,7 @@ test('无歌词音频：不产生任何歌词（不套用旧工程）', async ()
   assert.equal(project.analysis.instrumental, true);
   assert.equal(project.song.lines.length, 0);
   const engine = join(process.env.VIDEOGRAPH_PROJECTS, project.id, 'engine');
-  assert.deepEqual(JSON.parse(readFileSync(join(engine, 'data/lyrics.json'), 'utf8')).lines, []);
+  assert.deepEqual(JSON.parse(readFileSync(join(projectDataRoot(store.projectDir(project.id), project), 'lyrics.json'), 'utf8')).lines, []);
 });
 
 const pdoomBgm = fileURLToPath(new URL('../../../../pdoom-video/audio/pdoom.mp3', import.meta.url));

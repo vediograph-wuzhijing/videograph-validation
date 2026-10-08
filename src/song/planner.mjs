@@ -9,6 +9,13 @@ const EPS = 1e-6;
 const wordsOf = (analysis) => (analysis.lyrics?.lines ?? []).flatMap((line) => line.words.map((word) => ({ ...word, text: line.text })));
 
 const midWord = (analysis, t) => wordsOf(analysis).some((word) => word.start + EPS < t && t < word.end - EPS);
+const wordAt = (analysis,t) => wordsOf(analysis).find(word=>word.start+EPS<t&&t<word.end-EPS);
+function allowedWordCut(analysis,t,policy) {
+  const word=wordAt(analysis,t);
+  if(!word) return true;
+  if(policy==='warn') return true;
+  return policy==='sustain' && word.end-word.start>=Math.max(.5,45/(analysis.rhythm.bpm??120)) && t-word.start>=.08 && word.end-t>=.05;
+}
 
 function previousBeat(analysis, t) {
   const beats = analysis.rhythm.beats;
@@ -25,16 +32,16 @@ function snapToFrame(t, fps) {
 }
 
 /** 锚点先量化到帧，再重新检查词窗口；量化后落词中时继续回退到前一拍。 */
-function safeBeatCut(analysis, beat, fps, label) {
+function safeBeatCut(analysis, beat, fps, label, policy='strict') {
   if (beat !== null) {
     const cut = Math.max(0, snapToFrame(beat, fps));
-    if (!midWord(analysis, cut)) return cut;
+    if (allowedWordCut(analysis,cut,policy)) return cut;
   }
   const beats = analysis.rhythm.beats;
   for (let index = beats.length - 1; index >= 0; index--) {
     if (beat === null || beats[index] > beat + EPS) continue;
     const cut = Math.max(0, snapToFrame(beats[index], fps));
-    if (!midWord(analysis, cut)) return cut;
+    if (allowedWordCut(analysis,cut,policy)) return cut;
   }
   const cut = snapToFrame(0, fps);
   if (!midWord(analysis, cut)) return cut;
@@ -43,6 +50,10 @@ function safeBeatCut(analysis, beat, fps, label) {
 
 /** 单个切点：锚定行（lineIndex，或 lineText[+occurrence]）→ 行首词之前最近拍，帧吸附后仍避开词；器乐锚定段落起点。 */
 export function cutFromAnchor(analysis, anchor, { fps = 30 } = {}) {
+  if(!anchor||typeof anchor!=='object'||Array.isArray(anchor)||!Number.isInteger(fps)||fps<1||fps>240) throw new SongError('invalid cut anchor or fps');
+  const policy=anchor.cutPolicy??'strict';
+  if(!['strict','warn','sustain'].includes(policy)) throw new SongError('cutPolicy 必须是 strict/warn/sustain');
+  if(anchor.occurrence!==undefined&&(!Number.isInteger(anchor.occurrence)||anchor.occurrence<1)) throw new SongError('occurrence 必须是正整数');
   const duration = analysis.audio.duration;
   if (anchor.lineIndex !== undefined || anchor.lineText !== undefined) {
     const lines = analysis.lyrics?.lines ?? [];
@@ -59,17 +70,18 @@ export function cutFromAnchor(analysis, anchor, { fps = 30 } = {}) {
       line = matches[(anchor.occurrence ?? 1) - 1];
       if (!line) throw new SongError(`歌词行「${String(anchor.lineText).slice(0, 40)}」没有第 ${anchor.occurrence} 次出现（共 ${matches.length} 次）`);
     }
-    return safeBeatCut(analysis, previousBeat(analysis, line.words[0].start), fps, `行「${line.text.slice(0, 40)}」`);
+    return safeBeatCut(analysis, previousBeat(analysis, line.words[0].start), fps, `行「${line.text.slice(0, 40)}」`,policy);
   }
   if (anchor.sectionIndex !== undefined) {
-    const section = analysis.sections[anchor.sectionIndex];
+    const section = Number.isInteger(anchor.sectionIndex)?analysis.sections[anchor.sectionIndex]:undefined;
     if (!section) throw new SongError(`锚定段落不存在：#${anchor.sectionIndex}`);
-    return safeBeatCut(analysis, section.start, fps, `段落 #${anchor.sectionIndex}`);
+    return safeBeatCut(analysis, section.start, fps, `段落 #${anchor.sectionIndex}`,policy);
   }
   if (anchor.t !== undefined) {
+    if(!Number.isFinite(anchor.t)) throw new SongError('切点 t 必须是有限数字');
     const cut = snapToFrame(anchor.t, fps);
     if (cut < 0 || cut > duration) throw new SongError(`切点越界：${cut}`);
-    if (midWord(analysis, cut)) throw new SongError(`切点 ${cut}s 落在一个词的中间`);
+    if (!allowedWordCut(analysis,cut,policy)) throw new SongError(`切点 ${cut}s 落在一个词的中间`);
     return cut;
   }
   throw new SongError('切点需要 lineIndex/lineText/sectionIndex/t 之一');
@@ -109,6 +121,8 @@ export function validatePlan(plan, analysis, { fps = 30, shotRange = DEFAULT_SHO
   plan.forEach((entry, index) => {
     if (!entry || typeof entry !== 'object') throw new SongError(`plan[${index}] 必须是对象`);
     const cut = cutFromAnchor(analysis, entry, { fps });
+    const word=wordAt(analysis,cut);
+    if(word) warnings.push(`切点 ${cut.toFixed(3)}s 位于词「${word.w}」持续段（${entry.cutPolicy}），请检查视觉衔接；歌词时序保持原值`);
     if (index > 0 && cut > duration - 1 / fps + EPS) throw new SongError(`plan[${index}] 切点 ${cut}s 距曲尾不足一帧（时长 ${duration}s），会产生空镜头`);
     if (index === 0 && cut !== 0) {
       warnings.push(`plan[0] 锚点切点为 ${cut}s，已强制为 0（覆盖全曲）`);

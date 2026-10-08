@@ -96,12 +96,15 @@ export function unbindBrandReference(dir, id, refKey) {
 }
 
 export function removeBrandAsset(dir, id) {
-  return mutate(dir, (library) => {
+  let orphan;
+  const result = mutate(dir, (library) => {
     const asset = findAsset(library, id);
     if (asset.locked) throw new BrandError('素材已锁定，请先解锁再删除', 409);
     if (asset.referencedBy.length > 0) throw new BrandError(`素材仍被引用（${asset.referencedBy.join(', ')}），请先解除引用再删除`, 409);
     library.assets = library.assets.filter((entry) => entry.id !== id);
     const shared = library.assets.some((entry) => entry.hash === asset.hash);
-    if (!shared) { try { unlinkSync(join(dir, 'blobs', asset.hash)); } catch { /* 已被外部清理 */ } }
+    if (!shared) orphan = asset.hash;
   });
+  if (orphan) { try { unlinkSync(join(dir, 'blobs', orphan)); } catch { /* GC can retry orphan cleanup later. */ } }
+  return result;
 }

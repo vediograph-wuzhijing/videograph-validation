@@ -11,6 +11,7 @@ export const CRAFT_TOPICS = {
   effects: 'references/effects.md',
   'media-styles': 'references/media-styles.md',
   pipeline: 'references/pipeline-playbook.md',
+  'pv-production': 'references/pv-production.md',
   platform: 'references/platform-videograph.md',
 };
 export const CRAFT_CAP = 12000;
@@ -51,13 +52,18 @@ export function craftGuide({ topic, query } = {}) {
         .map((entry) => entry.section);
     }
   }
-  let text = `# shotcraft 节选 · ${file}${query ? ` · query: ${query}` : ''}\n\n`;
+  let text = `# shotcraft 节选 · ${file}${query ? ` · query: ${String(query).slice(0, 1000)}` : ''}\n\n`;
+  const suffix = `…（已达 ${CRAFT_CAP} 字符上限；完整内容读仓库 skills/shotcraft/${file}）\n`;
+  const budget = CRAFT_CAP - suffix.length;
   let truncated = false;
   for (const section of picked) {
     const chunk = `## ${section.title}\n${section.body.trimEnd()}\n\n`;
-    if (text.length + chunk.length > CRAFT_CAP) { truncated = true; break; }
+    if (text.length + chunk.length > budget) {
+      text += chunk.slice(0, Math.max(0, budget - text.length));
+      truncated = true; break;
+    }
     text += chunk;
   }
-  if (truncated) text += `…（已达 ${CRAFT_CAP} 字符上限；完整内容读仓库 skills/shotcraft/${file}）\n`;
+  if (truncated) text += suffix;
   return { file, text: text.trimEnd(), truncated, total: raw.length };
 }

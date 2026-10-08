@@ -43,6 +43,7 @@ export const feedbackToolDefinitions: FeedbackToolDefinition[] = [
       type: 'object',
       properties: {
         projectId: { type: 'string' },
+        shotId: {type:'string',description:'只读取指定镜头的意见'},
         status: { type: 'string', enum: ['open', 'pending', 'needs-clarification', 'responded', 'accepted'], description: "默认 'pending'；'open' 为全部未接受" },
       },
     },
@@ -128,6 +129,7 @@ export async function callFeedbackTool(name: string, args: Record<string, unknow
   if (name === 'project_feedback_inbox') {
     const query = new URLSearchParams({ status: typeof args.status === 'string' ? args.status : 'pending' });
     if (args.projectId !== undefined) query.set('projectId', String(args.projectId));
+    if (args.shotId !== undefined) query.set('shotId', String(args.shotId));
     return serviceFetch(`/feedback?${query}`);
   }
   if (name === 'project_feedback_ask') {
@@ -174,13 +176,17 @@ function stillImageContents(value: unknown): { contents: McpContent[]; skipped: 
  * 统一把 JSON 工具结果封装为 MCP content（含 stills/AE 产物的 image 内容）。
  * 结果里的长文本（节奏表、节奏报告、技法节选）单独作为一段原样文本，避免被 JSON 转义成一行。
  */
-export function mcpToolResult(value: Record<string, unknown>, { embedImages = true } = {}): { content: McpContent[] } {
+export function mcpToolResult(value: Record<string, unknown>, { embedImages = true } = {}): { content: McpContent[]; structuredContent: Record<string, unknown> } {
   const { contents: images, skipped } = embedImages ? stillImageContents(value) : { contents: [], skipped: [] };
   const result = value.result as Record<string, unknown> | undefined;
   const longText = typeof value.text === 'string' ? value.text : typeof result?.text === 'string' ? result.text : null;
   let structured: Record<string, unknown> = value;
   if (typeof value.text === 'string') { const { text: _text, ...rest } = value; structured = rest; }
   else if (result && typeof result.text === 'string') { const { text: _text, ...rest } = result; structured = { ...value, result: rest }; }
-  const note = skipped.length ? [{ type: 'text' as const, text: `图片总量超过嵌入上限，以下只给路径（同机可直接读取 projects/<projectId>/<file>）：${skipped.join(', ')}` }] : [];
-  return { content: [{ type: 'text', text: JSON.stringify(structured, null, 2) }, ...(longText ? [{ type: 'text' as const, text: longText }] : []), ...images, ...note] };
+  const imageEmbedding = skipped.length ? { skipped, reason: 'image embedding size limit; use artifact paths' } : undefined;
+  if (imageEmbedding) structured = { ...structured, imageEmbedding };
+  return {
+    structuredContent: imageEmbedding ? { ...value, imageEmbedding } : value,
+    content: [{ type: 'text', text: JSON.stringify(structured, null, 2) }, ...(longText ? [{ type: 'text' as const, text: longText }] : []), ...images],
+  };
 }

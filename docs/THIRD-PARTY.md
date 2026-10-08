@@ -23,3 +23,9 @@
 ## npm 依赖
 
 具体版本由 `package-lock.json` 固定，各包继续适用自身许可证。直接依赖/更新由集成者统一操作；提交代码不提交 `node_modules`。发布前应基于最终依赖清单检查许可证与必要通知。
+
+## Windows 0.2 分发清单
+
+新歌引擎的 MIT 核心及许可字体位于 engine-base/runtime，保留 LICENSE、CREDITS.md、字体OFL文本和逐文件SHA清单；不含原曲音频/歌词/场景插画。本项目 components 源码遵守根 GPL-3.0-only。Node 的精确版本许可证与 npm 依赖通知由打包脚本写入 runtime/NODE-LICENSE.txt 和 DEPENDENCY-LICENSES.json，依赖自带LICENSE继续保留。FFmpeg/ffprobe、模型、声库与重采样器二进制不随包发布。
+
+音源不允许二次分发。发布只包含程序、明确许可的代码/字体/图标和文档；排除 public/audio、dist/audio、video、用户工程、音频/MIDI/视频产物、声库与模型。仓库展示影片仅在原仓库展示，Windows 分发README去除影片链接；本地文件不因此删除。

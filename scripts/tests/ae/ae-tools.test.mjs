@@ -127,6 +127,15 @@ test('project_contact_sheet：全片每镜头一帧', async () => {
   assert.equal(images.length, 1);
 });
 
+test('project_contact_sheet：指定跨镜头时间，保持输入顺序与标签', async () => {
+  const selections = [{shotId:'b',t:5.25},{shotId:'a',t:1.25},{shotId:'b',t:6.5}];
+  const { value, images } = await invoke('project_contact_sheet', {projectId,selections,waitSeconds:50});
+  assert.equal(value.status,'done',value.error);
+  assert.deepEqual(value.result.selections, selections);
+  assert.deepEqual(value.result.shots.map(s=>s.id), ['b','a','b']);
+  assert.equal(images.length,1);
+});
+
 test('project_rhythm_report：下拍闪白镜头命中下拍；全片报告与对照图', async () => {
   const shot = await invoke('project_rhythm_report', { projectId, shotId: 'a', waitSeconds: 50 });
   assert.equal(shot.value.status, 'done', shot.value.error);

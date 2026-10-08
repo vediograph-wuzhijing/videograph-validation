@@ -2,12 +2,8 @@
 // 审阅室里它是一张“审片卡”：阶段、阻塞、AI 自评与证据图，人在这里决定是否接受。
 import { projectFile, type DirectorSnapshot } from './api';
 
-export type DirectorLoadState = {
-  projectId: string;
-  status: 'loading' | 'ready' | 'absent' | 'error';
-  snapshot?: DirectorSnapshot;
-  error?: string;
-};
+import type { DirectorLoadState } from './contracts';
+export type { DirectorLoadState } from './contracts';
 
 function describe(value: unknown): string {
   if (value == null || value === '') return '未指定';

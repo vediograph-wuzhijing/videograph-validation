@@ -5,6 +5,8 @@
 export const ANALYSIS_SCHEMA = 'videograph-analysis/v2';
 export const SECTION_LABELS = ['intro', 'verse', 'chorus', 'bridge', 'outro', 'unknown'];
 export const LYRIC_SOURCES = ['user', 'lrc', 'asr'];
+export const TIMING_SOURCES = ['score','manual','audio-aligned','estimated'];
+function timingSource(value,label){if(value!==undefined&&!TIMING_SOURCES.includes(value))fail(`${label}.timingSource 非法`);return value;}
 export const ANALYSIS_LAYERS = ['audio', 'rhythm', 'sections', 'envelopes', 'onsets', 'lyrics', 'stems'];
 export const ENVELOPE_KEYS = ['rms', 'low', 'mid', 'high', 'vocal', 'drums', 'bass', 'other'];
 export const ONSET_KEYS = ['kick', 'snare', 'hat', 'vocal'];
@@ -80,7 +82,8 @@ function validateWords(words, label, lineStart, lineEnd) {
     const end = num(word.end, `${label}.words[${index}].end`, { min: start, max: lineEnd + 0.5 });
     const confidence = conf(word.conf, `${label}.words[${index}]`);
     previous = end;
-    return { w, start, end, ...(confidence !== undefined ? { conf: confidence } : {}) };
+    const source=timingSource(word.timingSource,`${label}.words[${index}]`);
+    return { w, start, end, ...(confidence !== undefined ? { conf: confidence } : {}),...(source?{timingSource:source}:{}) };
   });
 }
 
@@ -95,12 +98,15 @@ function validateLyrics(value, duration) {
     const start = num(line.start, `lyrics.lines[${index}].start`, { min: 0, max: duration });
     const end = num(line.end, `lyrics.lines[${index}].end`, { min: start, max: duration });
     const words = validateWords(line.words, `lyrics.lines[${index}]`, start, end);
-    return { text, start, end, words };
+    const source=timingSource(line.timingSource,`lyrics.lines[${index}]`);
+    if(line.fallback!==undefined&&typeof line.fallback!=='boolean')fail('line.fallback 必须为布尔值');
+    return { text, start, end, words,...(source?{timingSource:source}:{}),...(line.fallback!==undefined?{fallback:line.fallback}:{}) };
   });
   for (let i = 1; i < lines.length; i++) {
     if (lines[i].start < lines[i - 1].start) fail(`lyrics.lines[${i}] 必须按时间排列`);
   }
   let extras;
+  timingSource(value.timingSource,'lyrics');
   if (value.extras !== undefined) {
     if (!Array.isArray(value.extras)) fail('lyrics.extras 必须是数组');
     extras = value.extras.map((extra, index) => ({

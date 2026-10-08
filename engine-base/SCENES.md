@@ -1,31 +1,16 @@
-# engine-base/SCENES.md — 参考场景分级（SONG-03）
+# 引擎与可复用场景基础件
 
-> 依据：静态扫描 `ly.get('字面量')` 绑定（2026-10-02，40 个场景）。新歌工程只复制引擎核心与「通用」场景；
-> 「绑定 pdoom 歌词」的场景依赖原曲词句，换歌即无意义，不进新工程。
-> 分级可复查：`node -e` 扫描或在导入时由 `src/song/scene-lint.mjs` 拒绝引用不存在歌词的场景。
+0.2 新歌只复制清单校验后的 [runtime](runtime/) 和 [components](components/)，使用 [窗口模板](scenes/_window-template.ts) 创作；不复制原曲场景、插画、歌词或音乐。同级参考库仅用于操作者明确选择的原曲导入，现有工程的冻结引擎不会被自动升级。
 
-## 通用（30）——可直接进入新歌工程
-
-`pre1`、`pre2`、`pre3`、`hook1`、`hook2`、`hook3`、`hook4`、`stack`、`dense`、`fuse`、`bureau`、
-`outro` 及其余未列于下表的场景（它们只用 `f.t/lt/p`、包络、拍点与通用 `lyrics.lines`）。
-
-> 复核说明：v1 分级只按 `ly.get(` 字面量绑定判定；hook/pre 系列虽视觉上围绕歌词排版，但走的是
-> 通用 `lyrics.lines` 词级时间，任何歌曲都能复用其排版逻辑。
-
-## 绑定 pdoom 歌词（10）——仅参考工程使用
-
-| 场景 | `ly.get(` 次数 | 说明 |
+| 基础件 | 能力 | 维护文件 |
 |---|---|---|
-| `open` | 3 | "eyes"/"circuits"/"surprise" 触发的图纸重演 |
-| `loss` | 2 | "sudden drop"/"servant" 事件 |
-| `room` | 3 | "Trapped in the Chinese room"/"bag of shrooms" 等 |
-| `shoggoth` | 2 | "See through"/"shinigami eyes" |
-| `spacetime` | 4 | "stable training run"/"singularity's begun" 等 |
-| `ascent` | 4 | "basilisk boom"/"NVDA to the moon"/"Omega Point"/"One E thirty" |
-| `leftturn` | 2 | "Sharp left turn"/"there you are" |
-| `paperclips` | 3 | "paperclips"/"Killswitch guy's on PTO"/"nowhere left to go" |
-| `loom` | 3 | "foretold"/"masked pre-training"/"recursive self-upgrade" |
-| `ilya-room` | 2 | "Ilya see?"/"We'll never know" |
+| world | 相机位置/朝向/FOV、确定性漂移、投影、世界卡片 | [world.ts](components/world.ts) |
+| environment | 参数化 sky/ocean/underwater 全屏底层 | [environment.ts](components/environment.ts) |
+| text-motion | 逐字进退场组合、7种预设、字素分割 | [text-motion.ts](components/text-motion.ts) |
+| layers | 独立渲染目标、每层效果、排序/透明度/合成 | [layers.ts](components/layers.ts) |
 
-`engine-base/scenes/_window-template.ts` 是新场景的通用起点：只用 `lyrics.linesIn(start, end)`、
-拍点事件与包络，不用 `ly.get`。给它写的新场景自动是「通用」。
+AI 先 scene_component_search，再 scene_component_get 读类型/使用例。新工程从 ../components 导入，旧工程可根据返回源码内联，不能改旧冻结引擎。相机/运动以歌曲绝对时间求值，不依赖前一帧状态；环境是参数化基础，不声称物理海洋模拟。独立图层保护文字不受背景折射影响。场景负责调用 dispose；图层拥有渲染目标，外部材质/纹理由创建者管理。
+
+ly.get 字面量绑定由 TypeScript AST 检查，不能引用当前分析中不存在的歌词。草稿检查用于类型/初始化着色器，正式验证还负责渲染中创建的材料。模板不是成片或人工验收。
+
+引擎MIT来源及资源许可见 [第三方手册](../docs/THIRD-PARTY.md) 和 [字体登记](FONTS.md)。

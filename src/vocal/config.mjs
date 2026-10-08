@@ -59,9 +59,15 @@ function firstDefined(...candidates) {
 }
 
 function normalizeResampler(value, label) {
+  if (typeof value === 'string' && value.trim().startsWith('[')) {
+    let parsed;
+    try { parsed = JSON.parse(value); } catch { fail(`${label} argv 必须是合法 JSON 数组`); }
+    if (!Array.isArray(parsed)) fail(`${label} argv 必须是数组`);
+    return normalizeResampler(parsed, label);
+  }
   // 字符串 → 单可执行文件路径；数组 → argv 头（如 ["node", "stub.mjs"]，测试与包装脚本用）。
   if (Array.isArray(value)) {
-    if (value.length === 0 || value.some((x) => typeof x !== 'string')) {
+    if (value.length === 0 || value.some((x) => typeof x !== 'string') || !value[0].trim()) {
       fail(`${label} 的数组形式必须是非空字符串数组（argv 头）`);
     }
     return [...value];
@@ -108,18 +114,14 @@ export function resolveConfig(options = {}) {
     environ[CONFIG_ENV_KEYS.voicebankDir] ? [environ[CONFIG_ENV_KEYS.voicebankDir], `env:${CONFIG_ENV_KEYS.voicebankDir}`] : null,
   );
 
-  // 配置文件：项目级 → 用户级（先找到的生效）
-  let fileConfig = null;
-  if (!explicitHome || !explicitResampler || !explicitBank) {
-    const projectFile = readConfigFile(options.configFile ?? join(projectRoot, '.videograph', 'vocal.json'));
-    const userFile = projectFile ? null : readConfigFile(join(home, '.videograph', 'vocal.json'));
-    fileConfig = projectFile ?? userFile;
-    if (fileConfig) checks.push({ item: 'configFile', ok: true, detail: fileConfig.path });
-  }
+  // Merge by field: a project-specific contract must not hide the user's voicebank.
+  const fileConfigs = [readConfigFile(options.configFile ?? join(projectRoot, '.videograph', 'vocal.json')),
+    readConfigFile(join(home, '.videograph', 'vocal.json'))].filter(Boolean);
+  for (const config of fileConfigs) checks.push({ item: 'configFile', ok: true, detail: config.path });
 
   const pick = (key, explicit) => firstDefined(
     explicit,
-    fileConfig && fileConfig.data[key] !== undefined ? [fileConfig.data[key], `file:${fileConfig.path}`] : null,
+    ...fileConfigs.map((config) => [config.data[key], `file:${config.path}`]),
   );
 
   const homeHit = explicitHome ?? pick('openutauHome', null);
@@ -128,7 +130,7 @@ export function resolveConfig(options = {}) {
   const contractHit = firstDefined(
     options.resamplerContract !== undefined ? [options.resamplerContract, 'options'] : null,
     environ[CONFIG_ENV_KEYS.resamplerContract] ? [environ[CONFIG_ENV_KEYS.resamplerContract], `env:${CONFIG_ENV_KEYS.resamplerContract}`] : null,
-    fileConfig && fileConfig.data.resamplerContract !== undefined ? [fileConfig.data.resamplerContract, `file:${fileConfig.path}`] : null,
+    ...fileConfigs.map((config) => [config.data.resamplerContract, `file:${config.path}`]),
   );
   if (contractHit && !['classic', 'openutau'].includes(String(contractHit.value))) {
     fail(`resamplerContract 只能是 classic 或 openutau，实际: ${contractHit.value}`);
@@ -174,7 +176,7 @@ export function resolveConfig(options = {}) {
   const cacheHit = firstDefined(
     options.cacheDir !== undefined ? [options.cacheDir, 'options'] : null,
     environ[CONFIG_ENV_KEYS.cacheDir] ? [environ[CONFIG_ENV_KEYS.cacheDir], `env:${CONFIG_ENV_KEYS.cacheDir}`] : null,
-    fileConfig && fileConfig.data.cacheDir !== undefined ? [fileConfig.data.cacheDir, `file:${fileConfig.path}`] : null,
+    ...fileConfigs.map((config) => [config.data.cacheDir, `file:${config.path}`]),
   );
   if (cacheHit) {
     sources.cacheDir = { value: cacheHit.value, source: cacheHit.source };

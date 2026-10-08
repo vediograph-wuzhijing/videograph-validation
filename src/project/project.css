@@ -288,6 +288,15 @@ body {
 .project-source-modal header, .project-source-modal footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; font-size: 12px; }
 .project-source-modal textarea { flex: 1; min-height: 0; margin: 0 14px; padding: 14px; background: var(--widget); color: var(--text); border: 1px solid var(--line-2); border-radius: 6px; font: 12px/1.6 var(--mono); resize: none; tab-size: 2; }
 .project-source-modal footer span { color: var(--muted); font-size: 11px; }
+.source-draft-tools, .source-draft-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.source-draft-tools { padding:0 14px 12px; }
+.source-draft-tools span { color:var(--text-secondary); font-size:12px; }
+.source-draft-status { margin:0 14px 12px; max-height:100px; overflow:auto; white-space:pre-wrap; color:var(--text-primary); font-size:12px; }
+.source-draft-content { display:flex; flex:1; min-height:0; gap:12px; }
+.source-draft-content textarea { width:100%; }
+.source-draft-content.has-preview textarea { width:50%; }
+.source-draft-content iframe { width:50%; border:0; margin-right:14px; background:var(--widget); }
+@media(max-width:760px) { .source-draft-content.has-preview { flex-direction:column; } .source-draft-content.has-preview textarea { width:auto; flex:1; } .source-draft-content iframe { width:calc(100% - 28px); height:200px; margin:0 14px; } .project-source-modal footer { flex-wrap:wrap; } }
 .shot-validation { font-size: 11px; line-height: 1.7; max-height: 190px; overflow: auto; }
 .shot-validation summary { color: var(--text); cursor: pointer; }
 .project-feedback-node { width: 240px; }
@@ -411,7 +420,7 @@ body {
 .fb-region-inputs input { width: 52px; padding: var(--space-1); border: 1px solid var(--border-default); border-radius: var(--radius-sm); color: var(--text-primary); background: var(--widget); }
 .fb-submit { justify-self: start; }
 .fb-notes { display: grid; gap: var(--space-2); border-top: 1px solid var(--border-default); padding-top: var(--space-2); }
-.fb-note { display: grid; gap: var(--space-1); padding: var(--space-2); border: 1px solid var(--border-default); border-left-width: 3px; border-radius: var(--radius-sm); background: var(--widget); }
+.fb-note { display: grid; gap: var(--space-1); padding: var(--space-2); border: 1px solid var(--border-default); border-left-width: 1px; border-radius: var(--radius-sm); background: var(--widget); }
 .fb-note[data-status="needs-clarification"] { border-left-color: var(--semantic-warning); }
 .fb-note[data-status="responded"] { border-left-color: var(--accent); }
 .fb-note[data-status="accepted"] { border-left-color: var(--semantic-success); }
@@ -422,7 +431,7 @@ body {
 .fb-response { padding: var(--space-2); border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--surface-3); }
 .fb-response strong { font-size: var(--text-xs); }
 .fb-response p { margin: var(--space-1) 0 0; color: var(--text-primary); }
-.fb-thread { padding-left: var(--space-2); border-left: 2px solid var(--border-default); color: var(--text-muted); }
+.fb-thread { padding-left: var(--space-2); border-left: 1px solid var(--border-default); color: var(--text-muted); }
 .fb-thread span { margin-right: var(--space-2); font-size: var(--text-xs); color: var(--text-primary); }
 .fb-reply { display: grid; gap: var(--space-1); }
 .fb-empty { color: var(--text-muted); font-size: var(--text-xs); margin: 0; }
@@ -546,7 +555,7 @@ body {
 .director-section h3 { margin: 0; font-size: var(--text-xs); }
 .director-list { display: grid; gap: var(--space-2); margin: 0; padding-left: var(--space-4); }
 .director-list li { padding: var(--space-2); background: var(--widget); border-radius: var(--radius-sm); }
-.director-list li[data-blocked="true"] { border-left: 2px solid var(--semantic-warning); }
+.director-list li[data-blocked="true"] { border-left: 1px solid var(--semantic-warning); }
 .director-list a { display: block; margin-top: var(--space-1); }
 .director-subtitle { display: block; margin-top: var(--space-2); }
 .director-json { margin: var(--space-1) 0; padding: var(--space-2); max-height: 260px; overflow: auto; background: var(--surface-1); border-radius: var(--radius-sm); font-size: var(--text-xs); white-space: pre-wrap; overflow-wrap: anywhere; }

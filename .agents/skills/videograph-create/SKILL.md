@@ -13,6 +13,7 @@ description: 用 VideoGraph 的 videograph-pdoom MCP 从一首本地音频新建
 2. 检查本会话是否有 `videograph-pdoom` MCP 工具。如果没有，按 `docs/MCP-GUIDE.md` §1 启动工程服务、核对 MCP 配置并重连会话；不要直接改 SQLite 或绕过 MCP 模拟结果。服务端已有工作要先辨认归属，勿重启别人的实例。
 3. 读 `skills/shotcraft/SKILL.md`，按实际创作阶段读取其 `references/shots.md`、`transitions.md`、`media-styles.md`、`effects.md`、`pipeline-playbook.md`。其中 `platform-videograph.md` 若与 MCP-GUIDE 冲突，以 MCP-GUIDE 和当前工具响应为准。若本机安装了 `video-shotcraft`，创作前读它的 `references/aesthetic-rules.md`，终检时读 `references/final-review.md`；只采用可迁移到音乐 PV 的节奏、构图、文字可读性与证据化审片规则，不照搬其中的 Remotion 命令、产品宣传片素材/SFX 规则或固定时长。没有该 skill 时，使用本 skill 的内置审片准则继续。
 4. 读本 skill 的 [创作与审片准则](references/aesthetic-review.md)。形成针对这首歌的视觉方向（叙事主线、可见的主角/动作、材质与色彩、排版、能量曲线、镜头接力方式）；不要默认照抄参考工程的黑底橙光、原场景或歌词排版。
+5. 开工必须检索`effect_search`的后期与转场、`scene_component_search/get`的基础件，记录选择后再新写代码。有参考片/仓库先抽帧看联系表和关键运动，再读实现；按[PV制作流程](../../../skills/shotcraft/references/pv-production.md)执行。不能把读了文档当成看了参考画面。
 
 ## 导演方式与恢复
 
@@ -53,6 +54,10 @@ description: 用 VideoGraph 的 videograph-pdoom MCP 从一首本地音频新建
 
 ## 审美与迭代
 
+每轮先读`project_feedback_inbox({projectId,status:"open"})`，按目标ID/anchor/preserve处理意见，不要求人再口述镜头号。改过的镜头先用草稿少量静帧再正式提交，随后默认取连续帧看运动；约2秒12帧的参数、切点检查和歌词语义配方见[PV制作流程](../../../skills/shotcraft/references/pv-production.md)。只重提交实际改过的目标，复用仍匹配当前签名的任务；导出前将无法看到播放、无法听到音频等未验证项写入当前自评summary或warning，不把静帧抽检称为完整动态接受。OpenUtau/歌声模块已冻结，不主动扩展或优化其调用。
+
 每镜先写一句“观众应看到/感受到什么”，再选手法；一镜一个主角动作，有准备、变化和落点。全片有不同能量层级、清晰的视觉母题和实物/空间/动作，不是一套抽象背景加滚动歌词。让上一镜的形状、运动方向或颜色成为下一镜的入口；硬切也可以是最有力的转场。先看真实画面再调整，最多在同一技术错误上重试两轮；超出后报告具体阻塞。
 
 按 [创作与审片准则](references/aesthetic-review.md) 对每镜和全片做证据化自查，记录有时间点的缺陷与修复。人类审美接受是单独的门槛；不能替人点接受。无法进行实际视觉检查时，明确说明只通过了技术验证，不称为高质量成片。
+
+0.2 大工程迭代：先用 project_draft_check / preview / stills 检查未提交代码，不制造任务/快照。多镜明确共享同一修改时逐镜 claim 最新制作 action，把各自 attemptToken/expectedInputRevision 组成 project_scene_module_submit.bindings，重读工程revision后一次发布；任一锁/冲突整批回滚，按各自receipt分别complete，随后重读next。不能把转场的旧依赖纳入批量。已有歌词/节拍真值可在建工程时传truth跳过模型；超过半数估算歌词不能确认，先校正。MIDI/假名与外部人声通过导入工具生成草稿；仍由人在候选试听后采用。

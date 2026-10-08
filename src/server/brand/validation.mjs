@@ -25,7 +25,7 @@ const optionalText = (value, label, limit) => {
 /** 导入输入归一化：只接受名称/类型/版权/备注；hash、ref、字节由存储层处理。 */
 export function normalizeAssetInput(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new BrandError('无效的素材输入');
-  if (typeof input.bytes !== 'undefined' && typeof input.ref !== 'undefined') throw new BrandError('素材字节与引用由存储层管理，不能随元数据提交');
+  if (typeof input.bytes !== 'undefined' || typeof input.ref !== 'undefined') throw new BrandError('素材字节与引用由存储层管理，不能随元数据提交');
   const name = cleanText(input.name, '素材名称', 120);
   if (!BRAND_ASSET_KINDS.includes(input.kind)) throw new BrandError(`未知素材类型：${String(input.kind)}`);
   return { name, kind: input.kind, copyright: optionalText(input.copyright, '版权说明', 500), notes: optionalText(input.notes, '备注', 2000) };

@@ -13,3 +13,7 @@
 *.mp4 binary
 *.mp3 binary
 *.ttf binary
+
+# Vendored engine files are addressed by exact byte hashes in manifest.json.
+# Keep their original bytes across Git checkouts on Windows and Linux.
+engine-base/runtime/** -text

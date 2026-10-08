@@ -1,11 +1,9 @@
 // project-store.mjs — 本地工程事实源。SQLite 元数据/历史 + 内容寻址源码 + 完整引擎快照。
-import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, statSync, cpSync, copyFileSync, constants } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, cpSync, copyFileSync, constants } from 'node:fs';
 import { resolve, join, extname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { referenceShots } from './reference-plan.mjs';
-import { ProjectError } from './errors.mjs';
+import { ProjectError, requireRevision } from './errors.mjs';
 import { prepareLyricPlan, shotLyricContext } from './lyric-elements.mjs';
 import { normalizeProject, transitionPair, transitionConfig, validateTransitionConfig, transitionWindow } from './transitions.mjs';
 import { createSongProject } from './song-project.mjs';
@@ -15,84 +13,9 @@ import { trackDirectorCommit, receiptDirectorCommit } from './director-commit.mj
 import { prepareShotEffects } from './fx/apply.mjs';
 export { ProjectError } from './errors.mjs';
 
-export const productRoot = fileURLToPath(new URL('../..', import.meta.url));
-export const projectsRoot = resolve(process.env.VIDEOGRAPH_PROJECTS ?? join(productRoot, 'projects'));
+import { productRoot, projectsRoot, sha256, safeId, projectDir, readProject, listProjects, mutateProject, initProjectDb, hashTree } from './project-repository.mjs';
+export { productRoot, projectsRoot, sha256, safeId, projectDir, readProject, listProjects, mutateProject, initProjectDb, hashTree, SCHEMA_VERSION, saveJob, listJobs, listUnfinishedJobs, readJob } from './project-repository.mjs';
 const referenceRoot = resolve(productRoot, '../pdoom-video');
-export const sha256 = (value) => createHash('sha256').update(value).digest('hex');
-export const safeId = (value) => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,80}$/.test(value);
-export function projectDir(id) {
-  if (!safeId(id)) throw new ProjectError('invalid project id');
-  const dir = join(projectsRoot, id);
-  if (!existsSync(join(dir, 'project.sqlite'))) throw new ProjectError('project not found', 404);
-  return dir;
-}
-function open(id) { const db = new DatabaseSync(join(projectDir(id), 'project.sqlite')); db.exec('PRAGMA busy_timeout=5000;'); return db; }
-function parse(row) { return row ? JSON.parse(row.data) : null; }
-
-export function readProject(id) {
-  const db = open(id);
-  try { return normalizeProject(parse(db.prepare('SELECT data FROM project WHERE id=1').get())); }
-  finally { db.close(); }
-}
-/** 单个工程读不出来（半建好、库损坏）时跳过，不能让列表与后台轮询整体失败。 */
-export function listProjects() {
-  if (!existsSync(projectsRoot)) return [];
-  return readdirSync(projectsRoot).filter((id) => safeId(id) && existsSync(join(projectsRoot, id, 'project.sqlite')))
-    .flatMap((id) => {
-      let p;
-      try { p = readProject(id); } catch (error) { console.error(`[工程] 跳过无法读取的 ${id}：${error.message}`); return []; }
-      return [{ id, name: p.name, revision: p.revision, createdAt: p.createdAt, updatedAt: p.updatedAt ?? p.createdAt, shots: p.shots.length, duration: p.song?.duration ?? null, status: p.status ?? 'normal',
-        audio: { name: p.audio?.name ?? null, hash: p.audio?.hash?.slice(0, 12) ?? null }, audioHash: p.audio?.hash ?? null }];
-    })
-    .sort((a, b) => b.createdAt - a.createdAt);
-}
-const KEEP_REVISIONS = 200;
-export function mutateProject(id, expectedRevision, mutate) {
-  const db = open(id);
-  let begun = false;
-  try {
-    db.exec('BEGIN IMMEDIATE');
-    begun = true;
-    const current = normalizeProject(parse(db.prepare('SELECT data FROM project WHERE id=1').get()));
-    if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new ProjectError('工程已更新，请重新读取后再操作', 409);
-    const next = normalizeProject(mutate(structuredClone(current)));
-    next.revision = current.revision + 1;
-    next.updatedAt = Date.now();
-    const data = JSON.stringify(next);
-    db.prepare('UPDATE project SET data=? WHERE id=1').run(data);
-    db.prepare('INSERT INTO revisions(revision,data,created_at) VALUES(?,?,?)').run(next.revision, data, next.updatedAt);
-    // 每次写入都存整份工程（含歌曲分析），只留最近的历史，避免库无限增长；revision 0（初始导入）保留。
-    db.prepare('DELETE FROM revisions WHERE revision > 0 AND revision <= ?').run(next.revision - KEEP_REVISIONS);
-    db.exec('COMMIT');
-    return next;
-  } catch (error) {
-    if (begun) { try { db.exec('ROLLBACK'); } catch { /* 保留原始错误 */ } }
-    throw error;
-  }
-  finally { db.close(); }
-}
-
-export const SCHEMA_VERSION = 1;
-/** 新工程库：project 单行 + revisions 历史 + jobs；user_version 供以后迁移判断。 */
-export function initProjectDb(file, project) {
-  const db = new DatabaseSync(file);
-  try {
-    db.exec(`PRAGMA journal_mode=WAL;
-      CREATE TABLE IF NOT EXISTS project(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS revisions(revision INTEGER PRIMARY KEY,data TEXT NOT NULL,created_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,kind TEXT NOT NULL,status TEXT NOT NULL,data TEXT NOT NULL,updated_at INTEGER NOT NULL);
-      PRAGMA user_version=${SCHEMA_VERSION};`);
-    db.prepare('INSERT INTO project VALUES(1,?)').run(JSON.stringify(project));
-    db.prepare('INSERT INTO revisions VALUES(0,?,?)').run(JSON.stringify(project), project.createdAt);
-  } finally { db.close(); }
-}
-
-export function hashTree(dir, prefix = '') {
-  return readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
-    const key = prefix + entry.name;
-    return entry.isDirectory() ? hashTree(join(dir, entry.name), key + '/') : [[key, sha256(readFileSync(join(dir, entry.name)))]];
-  });
-}
 
 /** 参考 BGM 指纹命中 → 复用已对齐分析（不说成重新识别）；其他音频 → 新歌工程，排队分析（song-project.mjs）。 */
 export function createProjectFromAudio(audioPath, name, opts = {}) {
@@ -107,11 +30,12 @@ export function createProjectFromAudio(audioPath, name, opts = {}) {
     if (existing.length) throw new ProjectError(`这段音频已有 ${existing.length} 个工程：请继续修改已有工程；确实要另起一个新工程时传 allowDuplicate: true`, 409,
       { existingProjects: existing.map(({ id, name: projectName, updatedAt }) => ({ id, name: projectName, updatedAt })) });
   }
-  const knownHash = sha256(readFileSync(join(referenceRoot, 'audio/pdoom.mp3')));
+  const referenceAudio = join(referenceRoot, 'audio/pdoom.mp3');
+  const knownHash = existsSync(referenceAudio) ? sha256(readFileSync(referenceAudio)) : null;
   const isReference = audioHash === knownHash;
 
   // SONG-05: 指纹命中 → 参考导入流程；否则 → 空工程 + analysis-pending
-  if (isReference) {
+  if (isReference && opts.truth===undefined) {
     return createReferenceProject(audioPath, path, audio, audioHash, name);
   } else {
     return createSongProject(path, audio, audioHash, name, opts);
@@ -179,12 +103,12 @@ export function readShotLyricContext(id, shotId) {
 
 function versionSnapshot(shot) {
   return structuredClone({ module: shot.module, params: shot.params, source: shot.source, start: shot.start, end: shot.end,
-    codeHash: shot.codeHash, prompt: shot.prompt, lyricPlan: shot.lyricPlan, summary: shot.summary, validation: shot.validation,
+    codeHash: shot.codeHash, sceneModuleId: shot.sceneModuleId, sceneModuleRevision: shot.sceneModuleRevision, prompt: shot.prompt, lyricPlan: shot.lyricPlan, summary: shot.summary, validation: shot.validation,
     intent: shot.intent, mode: shot.mode, duration: shot.duration, easing: shot.easing, direction: shot.direction, effects: shot.effects, effect: shot.effect });
 }
 /** 快照键以基线为唯一事实：候选期写入而基线没有的字段必须删除，浅合并会残留候选的 codeHash/summary 等。 */
 function restoreSnapshot(target, snapshot) {
-  for (const key of ['module', 'params', 'source', 'start', 'end', 'codeHash', 'prompt', 'lyricPlan', 'summary', 'validation', 'intent', 'mode', 'duration', 'easing', 'direction', 'effects', 'effect']) {
+  for (const key of ['module', 'params', 'source', 'start', 'end', 'codeHash', 'sceneModuleId', 'sceneModuleRevision', 'prompt', 'lyricPlan', 'summary', 'validation', 'intent', 'mode', 'duration', 'easing', 'direction', 'effects', 'effect']) {
     if (snapshot[key] === undefined) delete target[key];
     else target[key] = structuredClone(snapshot[key]);
   }
@@ -242,35 +166,78 @@ export function readShotSource(id, shotId) {
   // 新歌工程的未生成镜头没有源码：返回通用窗口模板作为起点（标记 template，不算该镜头的版本）。
   const template = shot.module === null && existsSync(join(engine, 'app/src/scenes/_window-template.ts'));
   if (!template && !safeId(shot.module)) throw new ProjectError('shot not found', 404);
-  return { shot, ...(template ? { template: true } : {}), code: readFileSync(join(engine, `app/src/scenes/${template ? '_window-template' : shot.module}.ts`), 'utf8'),
+  return { shot, projectRevision:project.revision, sharedModule:{id:shot.sceneModuleId ?? `scene-${shot.id}`,bindings:project.shots.filter(s=>shot.sceneModuleId?s.sceneModuleId===shot.sceneModuleId:shot.module&&s.module===shot.module).map(s=>({shotId:s.id,expectedInputRevision:s.inputRevision}))},
+    ...(template ? { template: true } : {}), code: readFileSync(join(engine, `app/src/scenes/${template ? '_window-template' : shot.module}.ts`), 'utf8'),
     contract: readFileSync(join(engine, 'docs/ENGINE.md'), 'utf8'), lyricContext: shotLyricContext(project, shot), source: shot.source };
 }
-export function submitShotSource(id, shotId, expectedInputRevision, code, summary = '', addressedFeedbackIds = [], author = 'mcp', feedbackResponses = [], attemptToken) {
+function validateSceneSource(code, author) {
   if (typeof code !== 'string' || code.length < 20 || code.length > 200000) throw new ProjectError('invalid scene code');
   if (!['mcp', 'human'].includes(author)) throw new ProjectError('invalid source author');
+}
+function sceneSourceFile(id, code) {
+  const hash = sha256(code), module = `vg-${hash}`, path = join(projectDir(id), `engine/app/src/scenes/${module}.ts`);
+  if (!existsSync(path)) writeFileSync(path, code, { flag: 'wx' });
+  else if (sha256(readFileSync(path)) !== hash) throw new ProjectError('不可变源码文件已被外部修改', 409);
+  return { hash, module };
+}
+function applySceneSource(project, shot, source, summary, author, responses, directorOp) {
+  shot.previousVersion = versionSnapshot(shot);
+  shot.module = source.module;
+  shot.codeHash = source.hash;
+  shot.source = author === 'human' ? 'human-authored' : 'mcp-authored';
+  shot.summary = String(summary).slice(0, 1000);
+  shot.inputRevision++;
+  shot.inputToken = randomUUID();
+  shot.status = 'needs-validation';
+  invalidateResponses(shot);
+  applyResponses(shot, responses, { codeHash: source.hash, inputToken: shot.inputToken, author });
+  delete shot.validation;
+  receiptDirectorCommit(project, shot, 'shot', directorOp);
+}
+export function submitShotSource(id, shotId, expectedInputRevision, code, summary = '', addressedFeedbackIds = [], author = 'mcp', feedbackResponses = [], attemptToken) {
+  validateSceneSource(code, author);
   return mutateProject(id, undefined, (project) => {
     const shot = shotFor(project, shotId, expectedInputRevision);
     const directorOp = trackDirectorCommit(project, shot, 'shot', attemptToken, author);
     if (shot.locked) throw new ProjectError('镜头已锁定', 409);
     if (project.status && project.song?.lines) assertSceneLint(code, { lyrics: { lines: project.song.lines } });
     const responses = prepareResponses(shot, addressedFeedbackIds ?? [], feedbackResponses ?? []);
-    shot.previousVersion = versionSnapshot(shot);
-    const hash = sha256(code);
-    const module = `vg-${hash}`;
-    const path = join(projectDir(id), `engine/app/src/scenes/${module}.ts`);
-    if (!existsSync(path)) writeFileSync(path, code, { flag: 'wx' });
-    else if (sha256(readFileSync(path)) !== hash) throw new ProjectError('不可变源码文件已被外部修改', 409);
-    shot.module = module;
-    shot.codeHash = hash;
-    shot.source = author === 'human' ? 'human-authored' : 'mcp-authored';
-    shot.summary = String(summary).slice(0, 1000);
-    shot.inputRevision++;
-    shot.inputToken = randomUUID();
-    shot.status = 'needs-validation';
-    invalidateResponses(shot);
-    applyResponses(shot, responses, { codeHash: hash, inputToken: shot.inputToken, author });
-    delete shot.validation;
-    receiptDirectorCommit(project, shot, 'shot', directorOp);
+    applySceneSource(project, shot, sceneSourceFile(id, code), summary, author, responses, directorOp);
+    delete shot.sceneModuleId;
+    delete shot.sceneModuleRevision;
+    return project;
+  });
+}
+
+/** One module publication, one SQLite revision, explicit guarded bindings.
+ * Every existing user of this module must participate so an edit cannot silently
+ * split the module. Single-shot submission explicitly detaches that shot. */
+export function submitSceneModule(id, moduleId, expectedProjectRevision, code, bindings, summary = '', author = 'mcp') {
+  validateSceneSource(code, author); requireRevision(expectedProjectRevision, 'expectedProjectRevision');
+  if (!safeId(moduleId) || !Array.isArray(bindings) || !bindings.length || bindings.length > 500 || new Set(bindings.map(b => b?.shotId)).size !== bindings.length) throw new ProjectError('invalid scene module bindings');
+  return mutateProject(id, expectedProjectRevision, project => {
+    const selected = new Set(bindings.map(b => b.shotId));
+    const omitted = project.shots.filter(s => s.sceneModuleId === moduleId && !selected.has(s.id));
+    if (omitted.length) throw new ProjectError('更新共享模块必须包含所有引用它的镜头', 409, { requiredShotIds: omitted.map(s => s.id) });
+    if (project.status && project.song?.lines) assertSceneLint(code, { lyrics: { lines: project.song.lines } });
+    const prepared = bindings.map(binding => {
+      requireRevision(binding.expectedInputRevision, 'binding.expectedInputRevision');
+      const shot = shotFor(project, binding.shotId, binding.expectedInputRevision);
+      if (shot.locked) throw new ProjectError(`镜头 ${shot.id} 已锁定，整批未提交`, 409);
+      if (binding.params !== undefined && (!binding.params || Array.isArray(binding.params) || typeof binding.params !== 'object' || JSON.stringify(binding.params).length > 16000)) throw new ProjectError('invalid binding params');
+      return { shot, binding, op: trackDirectorCommit(project, shot, 'shot', binding.attemptToken, author),
+        responses: prepareResponses(shot, binding.addressedFeedbackIds ?? [], binding.feedbackResponses ?? []) };
+    });
+    const source = sceneSourceFile(id, code), moduleRevision = (project.sceneModules?.[moduleId]?.revision ?? 0) + 1;
+    for (const {shot, binding, op, responses} of prepared) {
+      applySceneSource(project, shot, source, summary, author, responses, op);
+      shot.sceneModuleId = moduleId;
+      shot.sceneModuleRevision = moduleRevision;
+      if (binding.params !== undefined) shot.params = binding.params;
+    }
+    project.sceneModules ??= {};
+    project.sceneModules[moduleId] = { id: moduleId, module: source.module, codeHash: source.hash,
+      revision: moduleRevision, shotIds: [...selected], summary: String(summary).slice(0,1000) };
     return project;
   });
 }
@@ -390,7 +357,8 @@ export function replyFeedback(id, kind, targetId, feedbackId, text, by = 'human'
   return mutateProject(id, undefined, (project) => { replyOnNote(feedbackTarget(project, kind, targetId), feedbackId, text, by); return project; });
 }
 /** 待办收件箱；省略 projectId 时汇总全部本地工程。 */
-export function feedbackInbox({ projectId, status = 'open' } = {}) {
+export function feedbackInbox({ projectId, status = 'open',shotId } = {}) {
+  if(shotId!==undefined&&!safeId(shotId)) throw new ProjectError('invalid shot id');
   const ids = projectId ? [projectId] : listProjects().map((project) => project.id);
   const items = ids.flatMap((pid) => {
     const project = readProject(pid);
@@ -399,28 +367,6 @@ export function feedbackInbox({ projectId, status = 'open' } = {}) {
       try { return transitionWindow(project, target); } catch { return null; }
     } });
   });
-  return { status, count: items.length, items, rule: 'AI 只能响应或提问；采用/拒绝由人在界面完成。' };
-}
-
-export function saveJob(id, job) {
-  const db = open(id);
-  try { db.prepare('INSERT INTO jobs(id,kind,status,data,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,data=excluded.data,updated_at=excluded.updated_at')
-    .run(job.id, job.kind, job.status, JSON.stringify(job), Date.now()); }
-  finally { db.close(); }
-}
-export function listJobs(id, limit = 40) {
-  const db = open(id);
-  try { return db.prepare('SELECT data FROM jobs ORDER BY updated_at DESC LIMIT ?').all(Math.min(10000, Math.max(1, limit))).map(parse); }
-  finally { db.close(); }
-}
-/** 服务重启时恢复用：只取未结束的任务，按创建先后排序。 */
-export function listUnfinishedJobs(id) {
-  const db = open(id);
-  try { return db.prepare("SELECT data FROM jobs WHERE status IN ('queued','running')").all().map(parse).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0)); }
-  finally { db.close(); }
-}
-export function readJob(id, jobId) {
-  const db = open(id);
-  try { const job = parse(db.prepare('SELECT data FROM jobs WHERE id=?').get(jobId)); if (!job) throw new ProjectError('job not found', 404); return job; }
-  finally { db.close(); }
+  const filtered=shotId===undefined?items:items.filter(item=>item.targetKind==='shot'&&item.targetId===shotId);
+  return { status, count: filtered.length, items:filtered, rule: 'AI 只能响应或提问；采用/拒绝由人在界面完成。' };
 }

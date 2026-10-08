@@ -1,8 +1,8 @@
 ---
 name: shotcraft
-version: 1.4.0
-toolset: 2026-10-05
-description: 确定性节拍驱动代码视频的通用分镜/转场/特效/媒介风格技法库（从 pdoom-video 及 25 个 Opus 5.5 视频开源仓库蒸馏，平台无关）。当用户要为生成式音乐视频/动态影像设计分镜、转场、特效或视觉媒介风格（刻线版画、水彩笔刷、risograph、halftone、剪纸、火花、逐词卡拉OK、字体猛击、无限晶格、Droste、倒带循环…），要复刻某种视觉手法，或在使用 VideoGraph 平台（videograph MCP 全引擎管线 / VideoGraph 工坊 draw(ctx,f,api) mini-engine 队列）制作 PV 时使用。关键词：分镜、转场、特效、镜头卡、PV、卡拉OK、刻线、版画、riso、笔刷、媒介模拟、spark、videograph、VideoGraph、工坊、opus。
+version: 1.6.0
+toolset: 2026-10-08
+description: 确定性节拍驱动代码视频的通用分镜/转场/特效/媒介风格技法库（从 pdoom-video 及 25 个 Opus 5.5 视频开源仓库蒸馏，平台无关）。当用户要为生成式音乐视频/动态影像设计分镜、转场、特效或视觉媒介风格（刻线版画、水彩笔刷、risograph、halftone、剪纸、火花、逐词卡拉OK、字体猛击、无限晶格、Droste、倒带循环…），要复刻某种视觉手法，或在使用 VideoGraph 平台（videograph MCP 全引擎 Scene 管线）制作 PV 时使用。关键词：分镜、转场、特效、镜头卡、PV、卡拉OK、刻线、版画、riso、笔刷、媒介模拟、spark、videograph、VideoGraph、opus。
 ---
 
 # shotcraft：确定性代码视频的分镜·转场·特效技法库
@@ -16,6 +16,8 @@ description: 确定性节拍驱动代码视频的通用分镜/转场/特效/媒�
 1. **自由创作**：任何项目里设计分镜/转场/特效（本文 + 三个 references）。
 2. **VideoGraph 全引擎管线**（videograph MCP，Scene 类 TS 场景）→ 先读
    `references/platform-videograph.md`。
+
+VideoGraph开工先检索已有特效和基础件；有参考作品先渲染抽帧并观察运动，再读代码。每轮默认连续帧自查与意见收件箱，导出前说明未验证项。具体参数、混合媒介经验、文字PV配方和歌曲对拍见[PV制作流程](references/pv-production.md)，也可用`craft_guide({topic:"pv-production"})`读取。
 
 ## 五条通用法则（任何平台都先过这一关）
 
@@ -43,6 +45,7 @@ description: 确定性节拍驱动代码视频的通用分镜/转场/特效/媒�
 | 选/实现视觉媒介风格（水彩/riso/GPU 笔刷/剪纸/18 媒介引擎…） | `references/media-styles.md` — 媒介风格库 |
 | 查生态新增特效/转场（boil/套印漂移/brush wipe/HANDOFF 表…） | `references/fx-tx-addendum.md` |
 | 制片管线（换歌/本地化/验证闭环/agent 编排/风格 prompt 词汇表） | `references/pipeline-playbook.md` |
+| 参考研究、混合媒介PV、连续帧迭代与歌词语义配方 | [PV制作流程](references/pv-production.md) |
 | 落到 VideoGraph 平台 | `references/platform-videograph.md` |
 | 深挖范例的逐行实现 | `../pdoom-video/app/src/scenes/`（docs/TREATMENT.md 是风格圣经）；语料清单与许可见 [SOURCES.md](SOURCES.md) |
 
@@ -80,7 +83,7 @@ three.js 换歌系、risograph/GPU 笔刷/18 媒介引擎等独立风格系、vi
 - **L2 三维/raymarch**：G-buffer 刻线、实体光照、无限晶格、线框房间软件投影——需要
   three.js/3D 管线的平台。
 
-VideoGraph 两条管线的精确能力边界、契约与工作流见
+VideoGraph 当前管线的精确能力边界、契约与工作流见
 `references/platform-videograph.md`；把 L1/L2 手法降到 L0 的等价写法也在那里。
 
 ## 验证闭环（做完必须验，不能只看代码）

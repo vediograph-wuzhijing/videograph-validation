@@ -11,7 +11,7 @@ import { buildResamplerArgs } from '../../../src/vocal/resampler.mjs';
 import { loadVoicebank } from '../../../src/vocal/oto.mjs';
 import { renderUstx } from '../../../src/vocal/render.mjs';
 import { writeWavMono16, readWav } from '../../../src/vocal/wav.mjs';
-import { encodePitchesInt12 } from '../../../src/vocal/resampler.mjs';
+import { encodePitchesInt12, callResampler } from '../../../src/vocal/resampler.mjs';
 
 const work = mkdtempSync(join(tmpdir(), 'videograph-vocal-render-'));
 after(() => rmSync(work, { recursive: true, force: true }));
@@ -142,8 +142,8 @@ test('端到端：假重采样器契约形状与产物时长', async () => {
   assert.equal(call1.consonant, '300');
   assert.equal(call1.cutoff, '-100');
   assert.equal(call1.volume, '100');
-  assert.equal(call1.tempoMark, undefined); // classic 契约（默认）：没有 tempo 段
-  assert.equal(call1.pitchesLen, 0);        // 平直音高省略音高弯曲参（桩对缺参记 0）
+  assert.equal(call1.tempoMark, '!120'); // 相邻 C4/D4 的自动滑音进入前一音符尾部，classic 也必须带 tempo。
+  assert.ok(call1.pitchesLen > 0);
   assert.ok(call1.input.endsWith('a.wav'));
 
   // 产物：末音符起点 = 1.25拍*500 - preutter50 = 575ms；durRequired = max(500,300) → 网格取整 550ms
@@ -178,13 +178,13 @@ test('渲染缓存：同参数第二次渲染全部命中，不再调用重采�
     readFileSync(join(work, 'cache1.wav')),
     readFileSync(join(work, 'cache2.wav')),
   );
-  // 换 tempo 改变 !tempo/音高采样参数 → openutau 契约下会换键；classic 下 tempo 不入参，仍命中
+  // 自动滑音按 BPM 的 5 tick 采样；两个连音的参数变化，独立且同网格长度的末音仍复用。
   const higherTempo = serializeUstx(buildUstx({ ...plan, tempo: 121 }));
   const third = await renderUstx({
     ustxText: higherTempo, resampler: ['node', stubPath], outWav: join(work, 'cache3.wav'),
     voicebank: bank, workDir: join(work, 'cwork3'), cacheDir,
   });
-  assert.deepEqual(third.cacheSummary, { hits: 3, misses: 0 }); // classic 契约无 tempo 段，键不变
+  assert.deepEqual(third.cacheSummary, { hits: 1, misses: 2 });
 });
 
 test('端到端：未知别名给出可操作报错（含别名样例）', async () => {
@@ -242,4 +242,37 @@ test('端到端：多 part、缺 resampler、全休止均被拒绝', async () =>
     ustxText: serializeUstx(restOnly), resampler: ['node', stubPath], outWav: 'x.wav',
     voicebank: bank, workDir: join(work, 'w5'),
   }), /没有可渲染的音符/);
+});
+
+
+test('cache follows tool contents and recovers corrupt WAV artifacts', async () => {
+  const wrapper = join(work, 'mutable-resampler.mjs');
+  const original = readFileSync(stubPath, 'utf8');
+  writeFileSync(wrapper, original);
+  const options = { ustxText: serializeUstx(buildUstx(plan)), resampler: [process.execPath, wrapper], voicebank: loadVoicebank(makeBank()),
+    workDir: join(work, 'mutable-work'), cacheDir: join(work, 'mutable-cache'), outWav: join(work, 'mutable.wav') };
+  assert.deepEqual((await renderUstx(options)).cacheSummary, { hits: 0, misses: 3 });
+  assert.deepEqual((await renderUstx(options)).cacheSummary, { hits: 3, misses: 0 });
+  writeFileSync(wrapper, original + '\n// tool upgraded\n');
+  assert.deepEqual((await renderUstx(options)).cacheSummary, { hits: 0, misses: 3 });
+  for (const file of readdirSync(options.cacheDir)) writeFileSync(join(options.cacheDir, file), 'broken');
+  assert.deepEqual((await renderUstx(options)).cacheSummary, { hits: 0, misses: 3 });
+  assert.deepEqual((await renderUstx(options)).cacheSummary, { hits: 3, misses: 0 });
+});
+
+test('a tool that writes nothing cannot reuse an old intermediate output', async () => {
+  const out = join(work, 'stale-note.wav');
+  writeWavMono16(out, sine(.1, 440));
+  await assert.rejects(callResampler({ resampler: [process.execPath, '-e', ''], inputWav: 'unused', outputWav: out, tone: 60 }), /未产出输出文件/);
+  assert.equal(existsSync(out), false);
+});
+
+test('truncated chunks and zero channels are rejected before sample allocation', () => {
+  const out = join(work, 'invalid-format.wav');
+  writeWavMono16(out, sine(.1, 440));
+  const bytes = readFileSync(out);
+  bytes.writeUInt16LE(0, 22); writeFileSync(out, bytes);
+  assert.throws(() => readWav(out), /invalid WAV/);
+  bytes.writeUInt16LE(1, 22); writeFileSync(out, bytes.subarray(0, bytes.length - 10));
+  assert.throws(() => readWav(out), /truncated/);
 });

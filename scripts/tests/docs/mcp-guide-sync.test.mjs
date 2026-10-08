@@ -11,7 +11,7 @@ const guidePath = join(root, 'docs/MCP-GUIDE.md');
 const toolsPath = join(root, 'src/server/mcp-tools.ts');
 // FB-03 起工具定义分布在两个文件；指南一致性检查合并读取。
 // AE 冲刺起再加 mcp-ae-tools.ts（节奏表 / 帧序列 / 全片缩略图 / 节奏报告 / craft_guide）。
-const toolsCode = () => [toolsPath, join(root, 'src/server/mcp-feedback-tools.ts'), join(root, 'src/server/mcp-ae-tools.ts'), join(root, 'src/server/mcp-director-tools.ts'), join(root, 'src/server/mcp-fx-tools.ts')].map((file) => readFileSync(file, 'utf8')).join('\n');
+const toolsCode = () => readdirSync(join(root,'src/server')).filter(name=>/^mcp-.*tools\.ts$/.test(name)).map(name=>readFileSync(join(root,'src/server',name),'utf8')).join('\n').replaceAll("name:'","name: '");
 const guideMissing = existsSync(guidePath) ? false : 'MCP-GUIDE.md 尚未提交（等集成者 INT-00），提交后本测试自动启用';
 
 function walk(dir, files = []) {

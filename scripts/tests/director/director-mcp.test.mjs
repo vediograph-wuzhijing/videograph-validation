@@ -58,7 +58,7 @@ function configureFixture() {
 }
 
 async function humanAccept() {
-  const token = readFileSync(tokenFile, 'utf8');
+  const { token } = await (await fetch(`${base}/session`, { headers: { origin: base } })).json();
   const revision = (await getProject()).value.revision;
   const response = await fetch(`${base}/projects/${projectId}/director/accept-review`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ expectedProjectRevision: revision }) });
   const body = await response.text();

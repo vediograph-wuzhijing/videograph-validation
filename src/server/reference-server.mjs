@@ -7,21 +7,25 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, realpathSync, rmSync } from 'node:fs';
 import { renderShotsWithTransitions } from './transitions.mjs';
 import { FX_COMMON, hexToVec3, resolveParams } from '../fx/runtime.mjs';
+import { serveFile } from './media-files.mjs';
+import { hardCutBounds, patchEngineShutter } from './shutter.mjs';
 
 const productRoot = fileURLToPath(new URL('../..', import.meta.url));
 
 // 注入页面的宿主代码（转场/特效运行时）即渲染输入，分段缓存键用它的内容；
 // 本文件里对引擎源码的补丁逻辑改变渲染结果时，必须同时修改 HOST_PATCH_VERSION。
-export const HOST_PATCH_VERSION = 'reference-patch-v1';
+export const HOST_PATCH_VERSION = 'reference-patch-v3-cut-bounds';
 export const hostRuntimeSource = () => `const FX_COMMON = ${JSON.stringify(FX_COMMON)};\n${hexToVec3.toString()}\n${resolveParams.toString()}\n${readFileSync(new URL('./transition-runtime.mjs', import.meta.url), 'utf8')}`;
 
 /** framePort：渲染进程的帧 socket 端口；只有它会被写进 CSP 的 connect-src（预览不需要任何外连）。 */
-export async function startReferenceServer({ root = resolve(productRoot, '../pdoom-video'), port = 0, shots, transitions = [], fps = 30, audioFile = 'audio/pdoom.mp3', framePort } = {}) {
+export async function startReferenceServer({ root = resolve(productRoot, '../pdoom-video'), dataRoot, port = 0, shots, transitions = [], fps = 30, audioFile = 'audio/pdoom.mp3', framePort, sceneOverrides = {} } = {}) {
+  if (Object.entries(sceneOverrides).some(([key, value]) => !/^_draft-[a-f0-9]{64}$/.test(key) || typeof value !== 'string' || value.length > 200000)) throw new Error('invalid virtual scene override');
   if (!/^audio\/[a-z0-9._-]+$/i.test(audioFile) || audioFile.includes('..')) throw new Error('audioFile 必须位于引擎 audio/ 目录');
   if (framePort !== undefined && !Number.isInteger(framePort)) throw new Error('framePort 必须是整数端口');
   // 引擎根目录取真实路径：路径含软链接时（如 macOS 临时目录 /var → /private/var），Vite 把模块解析到真实路径，
   // 与按原路径配置的 root/fs.allow 不一致，会导致注入的镜头表不生效（画面全空）。
   root = realpathSync(root);
+  dataRoot = resolve(dataRoot ?? join(root, 'data'));
   const renderShots = shots ? renderShotsWithTransitions(shots, transitions, fps) : null;
   const dependencies = transitions.filter((transition) => transition.mode !== 'cut').map(({ fromShotId, toShotId }) => [fromShotId, toShotId]);
   const app = join(root, 'app');
@@ -30,7 +34,18 @@ export async function startReferenceServer({ root = resolve(productRoot, '../pdo
   const connectSrc = framePort ? `'self' ws://127.0.0.1:${framePort}` : "'self'";
   const csp = `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src ${connectSrc}; object-src 'none'; base-uri 'none'`;
   let middlewares;
-  const http = createHttpServer((req, res) => { res.setHeader('Content-Security-Policy', csp); middlewares(req, res); });
+  const http = createHttpServer((req, res) => {
+    res.setHeader('Content-Security-Policy', csp);
+    // Vite's Windows /@fs handler strips drive letters. Serve engine media directly,
+    // including projects stored on a different drive from this repository.
+    const pathname = new URL(req.url, 'http://localhost').pathname;
+    if ((req.method === 'GET' || req.method === 'HEAD') && /^\/(audio|data)\/[a-z0-9._-]+$/i.test(pathname)) {
+      try { serveFile(req, res, pathname.startsWith('/data/') ? join(dataRoot, pathname.slice(6)) : join(root, pathname.slice(1))); }
+      catch (error) { res.writeHead(error.status ?? 500); res.end(error.status === 404 ? 'file not found' : 'invalid media request'); }
+      return;
+    }
+    middlewares(req, res);
+  });
   const server = await createServer({
     configFile: false,
     root: app,
@@ -39,9 +54,17 @@ export async function startReferenceServer({ root = resolve(productRoot, '../pdo
     logLevel: 'error',
     plugins: [{
       name: 'videograph-reference-assets',
-      resolveId(id) { if (id === 'virtual:videograph-transitions') return '\0videograph-transitions'; },
+      resolveId(id) {
+        if (id === 'virtual:videograph-transitions') return '\0videograph-transitions';
+        const match = normalizePath(id).match(/(?:^|\/)scenes\/(_draft-[a-f0-9]{64})\.ts$/);
+        if (match && Object.hasOwn(sceneOverrides, match[1])) return join(app, 'src/scenes', `${match[1]}.ts`);
+      },
       // 特效箱宿主所需的着色器公共库与参数解析，直接取自 src/fx/runtime.mjs（与特效箱预览同一份实现）。
-      load(id) { if (id === '\0videograph-transitions') return hostRuntimeSource(); },
+      load(id) {
+        if (id === '\0videograph-transitions') return hostRuntimeSource();
+        const match = normalizePath(id).match(/\/scenes\/(_draft-[a-f0-9]{64})\.ts$/);
+        if (match && Object.hasOwn(sceneOverrides, match[1])) return sceneOverrides[match[1]];
+      },
       transformIndexHtml() {
         return [{ tag: 'link', attrs: { rel: 'icon', type: 'image/svg+xml', href: `/@fs/${normalizePath(join(productRoot, 'public/favicon.svg'))}` }, injectTo: 'head' }];
       },
@@ -54,8 +77,9 @@ export async function startReferenceServer({ root = resolve(productRoot, '../pdo
         });
       },
       transform(code, id) {
+        if (shots && normalizePath(id).endsWith('/src/engine/engine.ts')) return patchEngineShutter(code, hardCutBounds(shots, transitions, fps));
         if (shots && normalizePath(id).endsWith('/src/main.ts')) {
-          const patched = code.replace("new Audio('audio/pdoom.mp3')", `new Audio(${JSON.stringify(audioFile)})`).replace('await engine.init(onlySet ? (e) => onlySet.has(e.id) : undefined);', `if (onlySet) for (const [from, to] of ${JSON.stringify(dependencies)}) if (onlySet.has(to)) onlySet.add(from);\n await engine.init(onlySet ? (e) => onlySet.has(e.id) : undefined);`)
+          const patched = code.replace(/new Audio\(\s*(['"])audio\/pdoom\.mp3\1\s*\)/g, `new Audio(${JSON.stringify(audioFile)})`).replace('await engine.init(onlySet ? (e) => onlySet.has(e.id) : undefined);', `if (onlySet) for (const [from, to] of ${JSON.stringify(dependencies)}) if (onlySet.has(to)) onlySet.add(from);\n await engine.init(onlySet ? (e) => onlySet.has(e.id) : undefined);`)
             .replace('TIMELINE = engine.timeline;', `TIMELINE = !EXPORT && ONLY ? engine.timeline.filter(e => ONLY.split(",").includes(e.id)).map(e => ({...e, ...${JSON.stringify(shots.map(({ id, start, end }) => ({ id, start: Math.round(start * fps) / fps, end: Math.round(end * fps) / fps })))}.find(s => s.id === e.id)})) : engine.timeline;`)
             .replace('scrub.max = String(engine.duration);', 'scrub.min = String(params.get("rangeStart") ?? TIMELINE[0]?.start ?? 0); scrub.max = String(params.get("rangeEnd") ?? TIMELINE[TIMELINE.length - 1]?.end ?? engine.duration);')
             .replace('let loop: [number, number] | null = null;', 'let loop: [number, number] | null = ONLY && TIMELINE.length ? [Number(scrub.min), Number(scrub.max)] : null;');

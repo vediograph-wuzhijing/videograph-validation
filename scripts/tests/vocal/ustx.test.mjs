@@ -63,7 +63,7 @@ test('buildUstx：音符位置相对 part、默认滑音与颤音对齐 OpenUtau
   assert.equal(n1.tone, 60);
   assert.deepEqual(
     n1.pitch.data,
-    [{ x: PORTAMENTO.startMs, y: 0, shape: 'sp' }, { x: PORTAMENTO.lengthMs, y: 0, shape: 'io' }],
+    [{ x: PORTAMENTO.startMs, y: 0, shape: 'sp' }, { x: PORTAMENTO.startMs + PORTAMENTO.lengthMs, y: 0, shape: 'io' }],
   );
   assert.equal(n1.pitch.snap_first, true);
   assert.deepEqual(n1.vibrato, { length: 0, period: 175, depth: 25, in: 10, out: 10, shift: 0, drift: 0, vol_link: 0 });
@@ -120,4 +120,12 @@ test('validateUstxText：损坏结构逐条报告', () => {
   assert.ok(verdict.errors.some((e) => e.includes('ustx_version')));
   assert.ok(verdict.errors.some((e) => e.includes('tempos')));
   assert.ok(verdict.errors.some((e) => e.includes('voice_parts')));
+});
+
+
+test('invalid external USTX reports diagnostics instead of crashing or accepting zero tempo', () => {
+  for (const mutate of [p => { p.tempos = [null]; }, p => { p.tempos[0].bpm = 0; }, p => { p.voice_parts = [null]; }, p => { p.voice_parts[0].position = -1; }, p => { p.voice_parts[0].notes = [null]; }]) {
+    const project = buildUstx(simplePlan); mutate(project);
+    assert.equal(validateUstxText(serializeUstx(project)).ok, false);
+  }
 });

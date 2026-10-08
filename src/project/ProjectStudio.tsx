@@ -1,69 +1,48 @@
 // ProjectStudio.tsx — 审阅室：人看片、定位意见、对比采用；LLM 经 MCP 操作工程。工程/版本/作业状态均来自本地服务。
 // 主视图是画面 + 全片时间线；节点图降为只读的“结构视图”。
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { AudioLines, Clapperboard, FileCode2, FolderOpen, Upload, Play, Download, Lock, Unlock, Layers3, X, RefreshCw, Sparkles } from 'lucide-react';
-import { importBgm, projectApi, projectFile, serviceUrl, ProjectApiError, type DirectorSnapshot, type FeedbackAnchor, type VideoProject, type ProjectShot, type ProjectJob, type ProjectSummary } from './api';
+import { importBgm, projectApi, projectFile, serviceUrl, type DirectorSnapshot, type FeedbackAnchor, type VideoProject, type ProjectShot, type ProjectJob } from './api';
 import { LyricInspector } from './LyricInspector';
 import { TransitionInspector, transitionLabels } from './TransitionInspector';
 import { FeedbackComposer } from './FeedbackComposer';
 import { ReviewCompare } from './ReviewCompare';
 import { SongStagePanel } from './SongStagePanel';
-import { DirectorPanel, type DirectorLoadState } from './DirectorPanel';
+import { VocalPanel } from './VocalPanel';
+import { DirectorPanel } from './DirectorPanel';
 import { Timeline } from './Timeline';
-import { analysisSourceLabel, cacheSummaryText, sourceLabel, statusLabel } from './labels';
+import { analysisSourceLabel, sourceLabel, statusLabel } from './labels';
+import { useProjectSession } from './useProjectSession';
+import { usePreviewClock } from './usePreviewClock';
+import { JobPanel } from './JobPanel';
+import { ShotSourceDialog, type SourceDraft } from './ShotSourceDialog';
 import './project.css';
 import './review.css';
 
 // 结构视图（ReactFlow）与特效箱（WebGL 运行时）都不在首屏，按需加载。
 const StructureView = lazy(() => import('./StructureView'));
 const EffectsBox = lazy(() => import('./EffectsBox').then((module) => ({ default: module.EffectsBox })));
-const jobLabel: Record<string, string> = { queued: '排队', running: '运行中', done: '完成', error: '失败', interrupted: '已中断', cancelled: '已取消' };
 const phaseLabel: Record<string, string> = { analysis: '分析中', direction: '待定导演方案', planning: '规划中', producing: '制作中', validating: '验证中', repairing: '返修中', reviewing: '审片中', 'awaiting-human': '等待你确认', 'export-ready': '可以导出', exported: '已导出' };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
-const jobKindLabel = (job: ProjectJob) => job.kind === 'analysis' ? '歌曲分析'
-  : job.kind === 'export' ? '完整 PV' : job.kind === 'validate-transition' ? `转场 ${job.transitionId ?? ''}`
-  : job.kind === 'contact-sheet' ? '全片联系表' : job.kind === 'rhythm' ? '节奏报告'
-  : job.kind === 'filmstrip' ? '运动帧序列' : job.kind === 'stills' ? '静帧'
-  : `镜头 ${job.shotId ?? ''}`;
-
 export default function ProjectStudio() {
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [project, setProject] = useState<VideoProject | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedTransitionId, setSelectedTransitionId] = useState<string | null>(null);
-  const [jobs, setJobs] = useState<ProjectJob[]>([]);
-  const [directorState, setDirectorState] = useState<DirectorLoadState>({ projectId: '', status: 'absent' });
   const [error, setError] = useState('');
-  const [pollError, setPollError] = useState('');
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [previewKind, setPreviewKind] = useState('当前版本');
   const [compare, setCompare] = useState(false);
   const [view, setView] = useState<'review' | 'graph' | 'effects'>('review');
-  // FB-02：预览播放器每 250ms postMessage 当前时间；只接受预览 origin + iframe source 匹配的消息。
-  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
-  const previewTimeRef = useRef<number | null>(null);
-  const [hasPreviewTime, setHasPreviewTime] = useState(false);
-  const [playhead, setPlayhead] = useState<number | null>(null);
+  const { previewFrameRef, previewTimeRef, hasPreviewTime, playhead } = usePreviewClock(preview);
   const [pendingSeek, setPendingSeek] = useState<{ shotId: string; t: number } | null>(null);
-  const previewOrigin = useMemo(() => { try { return preview ? new URL(preview).origin : null; } catch { return null; } }, [preview]);
-  useEffect(() => { setHasPreviewTime(false); previewTimeRef.current = null; setPlayhead(null); }, [preview]);
-  useEffect(() => {
-    const onMessage = (event: MessageEvent) => {
-      if (!previewOrigin || event.origin !== previewOrigin || event.source !== previewFrameRef.current?.contentWindow) return;
-      const data = event.data as { type?: string; t?: number } | null;
-      if (data?.type === 'videograph:time' && typeof data.t === 'number' && Number.isFinite(data.t)) { previewTimeRef.current = data.t; setHasPreviewTime(true); setPlayhead(data.t); }
-    };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [previewOrigin]);
   const [form, setForm] = useState({ id: '', revision: 0, prompt: '', params: '{}' });
-  const [source, setSource] = useState<{ projectId: string; shotId: string; revision: number; code: string; feedbackIds: string[]; feedback: NonNullable<ProjectShot['feedback']> } | null>(null);
+  const [source, setSource] = useState<SourceDraft | null>(null);
   const [graphFocus, setGraphFocus] = useState<{ id: string; nonce: number } | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
-  const loadEpoch = useRef(0);
-  const directorStale = useRef(false);
-  const activeProjectId = useRef<string | null>(null);
+  const { projects, project, setProject, jobs, setJobs, directorState, setDirectorState, pollError, serviceWarning, activeProjectId, refreshList, load } = useProjectSession(
+    (data) => { setSelectedId(data.shots[0]?.id ?? null); setSelectedTransitionId(null); setPreview(null); setSource(null); },
+    (error) => setError(message(error)),
+  );
   const selectedTransition = project?.transitions?.find((transition) => transition.id === selectedTransitionId) ?? null;
   const selected = selectedTransition ? null : project?.shots.find((shot) => shot.id === selectedId) ?? null;
   const selectionRef = useRef('');
@@ -96,74 +75,6 @@ export default function ProjectStudio() {
     : !directorKnown && unaccepted ? '先校验候选并接受人工修改意见，再导出正式版本'
     : '导出冻结版本';
 
-  const refreshList = useCallback(async () => {
-    const data = await projectApi<{ projects: ProjectSummary[] }>('/projects'); setProjects(data.projects); return data.projects;
-  }, []);
-  const load = useCallback(async (id: string) => {
-    const epoch = ++loadEpoch.current;
-    const data = await projectApi<VideoProject>(`/projects/${id}`);
-    if (epoch !== loadEpoch.current) return;
-    activeProjectId.current = id;
-    setProject(data); setSelectedId(data.shots[0]?.id ?? null); setSelectedTransitionId(null); setPreview(null); setSource(null); setJobs([]);
-    setDirectorState({ projectId: id, status: 'loading' });
-    history.replaceState(null, '', `?view=project&project=${encodeURIComponent(id)}`);
-  }, []);
-  useEffect(() => {
-    void refreshList().then((list) => {
-      const id = new URLSearchParams(location.search).get('project');
-      if (id && list.some((entry) => entry.id === id)) return load(id);
-      if (list[0]) return load(list[0].id);
-    }).catch((err) => setError(message(err)));
-  }, [load, refreshList]);
-
-  useEffect(() => {
-    if (!project) return;
-    let stopped = false, polling = false, round = 0;
-    const id = project.id;
-    const tick = async () => {
-      if (polling) return; polling = true;
-      try {
-        const [currentResult, jobResult, directorResult] = await Promise.allSettled([
-          projectApi<VideoProject>(`/projects/${id}`),
-          projectApi<{ jobs: ProjectJob[] }>(`/projects/${id}/jobs`),
-          round++ % 3 === 0 || directorStale.current ? projectApi<DirectorSnapshot>(`/projects/${id}/director`) : Promise.reject(new Error('skip-director')),
-        ]);
-        // 切工程的 load 在 React effect 清理之前即可完成；ref 也挡住这一小段竞态。
-        if (stopped || activeProjectId.current !== id) return;
-        if (currentResult.status === 'fulfilled') {
-          const current = currentResult.value;
-          setProject((previous) => previous?.id === id && previous.revision <= current.revision ? current : previous);
-        }
-        if (jobResult.status === 'fulfilled') setJobs(jobResult.value.jobs);
-        if (directorResult.status === 'fulfilled') {
-          const snapshot = directorResult.value;
-          directorStale.current = false;
-          if (snapshot.projectId !== id) {
-            setDirectorState({ projectId: id, status: 'error', error: '服务端返回了其他工程的导演状态' });
-          } else if (!snapshot.director) {
-            setDirectorState({ projectId: id, status: 'absent' });
-          } else {
-            setDirectorState({ projectId: id, status: 'ready', snapshot });
-          }
-        } else if (directorResult.reason instanceof Error && directorResult.reason.message === 'skip-director') {
-          // 本轮不取导演状态，保留上一次结果
-        } else if (directorResult.reason instanceof ProjectApiError && directorResult.reason.status === 404) {
-          setDirectorState({ projectId: id, status: 'absent' });
-        } else {
-          setDirectorState({ projectId: id, status: 'error', error: message(directorResult.reason) });
-        }
-        // 轮询错误与操作错误分开：服务恢复后自动清除，也不覆盖用户操作的报错。
-        const firstError = [currentResult, jobResult].find((result) => result.status === 'rejected');
-        setPollError(firstError?.status === 'rejected' ? message(firstError.reason) : '');
-      } catch (err) { if (!stopped) setPollError(message(err)); }
-      finally { polling = false; }
-    };
-    void tick(); const timer = window.setInterval(() => void tick(), 2500);
-    return () => { stopped = true; window.clearInterval(timer); };
-  }, [project?.id]);
-
-  // 工程版本一变（如接受审片），下一轮轮询立即取导演快照，而不是等到第 3 轮。
-  useEffect(() => { directorStale.current = true; }, [project?.revision]);
   const resetForm = useCallback((shot: ProjectShot) => setForm({ id: shot.id, revision: shot.inputRevision, prompt: shot.prompt, params: JSON.stringify(shot.params, null, 2) }), []);
   // 操作成功后只在高级表单没有未保存草稿时刷新；有草稿则保留，由 staleForm 提示“载入最新版本”。
   const formDirty = Boolean(selected && form.id === selected.id && (form.prompt !== selected.prompt || form.params !== JSON.stringify(selected.params, null, 2)));
@@ -279,6 +190,7 @@ export default function ProjectStudio() {
         </div>
         {error && <div className="project-error" role="alert">{error}<button aria-label="关闭错误" onClick={() => setError('')}><X size={14} /></button></div>}
         {pollError && <div className="project-error is-poll" role="status">工程服务连接异常，正在自动重试：{pollError}</div>}
+        {serviceWarning && <div className="project-error is-poll" role="status">{serviceWarning}</div>}
         {!project ? <div className="project-empty"><AudioLines size={40} /><h2>把 BGM 变成可以操作的工程</h2><p>源码、字体、素材、时间线和渲染版本一起保存。关闭页面后，后台任务仍然继续。</p><button className="action-button" onClick={() => void act(async () => { await refreshList(); })}><RefreshCw size={14} />重新连接工程服务</button><code>npm run service</code></div>
           : view === 'effects' ? <Suspense fallback={<div className="project-note">正在加载特效箱…</div>}><EffectsBox projectId={project.id} shotId={selected?.id} shotTitle={selected?.title} shotRevision={selected?.inputRevision} busy={busy} onProject={setProject} /></Suspense>
           : view === 'graph' ? <Suspense fallback={<div className="project-note">正在加载结构视图…</div>}>
@@ -312,6 +224,7 @@ export default function ProjectStudio() {
           </div>}
       </main>
       <aside className="sidebar project-inspector">
+        {project && <VocalPanel key={project.id} project={project} busy={busy} onProject={setProject} onAction={act} onJob={(job) => setJobs((previous) => [job, ...previous.filter((entry) => entry.id !== job.id)])} />}
         {project && beforePlanning && <SongStagePanel key={project.id} project={project} busy={busy} onProject={setProject} onAction={act} />}
         {project && directorState.projectId === project.id && <DirectorPanel state={directorState} revision={project.revision} busy={busy} onAccepted={() => void act(async () => {
           const next = await projectApi<VideoProject>(`/projects/${project.id}/director/accept-review`, { expectedProjectRevision: director?.revision });
@@ -345,8 +258,8 @@ export default function ProjectStudio() {
           </details>
           <div className="inspector-tools">
             <button className="mini-button" disabled={busy} onClick={() => void act(async () => {
-              const data = await projectApi<{ shot: ProjectShot; code: string }>(`/projects/${project.id}/shots/${selected.id}/source`);
-              setSource({ projectId: project.id, shotId: selected.id, revision: data.shot.inputRevision, code: data.code, feedback: (data.shot.feedback ?? []).filter((note) => note.status !== 'accepted'), feedbackIds: [] });
+              const data = await projectApi<{ shot: ProjectShot; code: string; projectRevision:number; sharedModule:SourceDraft['sharedModule'] }>(`/projects/${project.id}/shots/${selected.id}/source`);
+              setSource({ projectId: project.id, shotId: selected.id, projectRevision:data.projectRevision, sharedModule:data.sharedModule, revision: data.shot.inputRevision, code: data.code, feedback: (data.shot.feedback ?? []).filter((note) => note.status !== 'accepted'), feedbackIds: [] });
             })}><FileCode2 size={13} />查看 / 修改真实源码</button>
             <button className="mini-button" disabled={busy || selected.status === 'needs-generation'} onClick={() => void act(async () => { const job = await projectApi<ProjectJob>(`/projects/${project.id}/validate`, { shotId: selected.id }); setJobs((previous) => [job, ...previous]); })}>5 帧校验</button>
             <button className="mini-button" disabled={busy} onClick={() => void update({ locked: !selected.locked })}>{selected.locked ? <Unlock size={13} /> : <Lock size={13} />}{selected.locked ? '解锁' : '锁定'}</button>
@@ -360,19 +273,18 @@ export default function ProjectStudio() {
             <button className="mini-button" disabled={busy || selected.locked || Boolean(staleForm)} onClick={() => { try { void update({ params: JSON.parse(form.params) }); } catch { setError('参数不是有效 JSON'); } }}>应用参数</button>
           </details>
         </> : <div className="project-note">选中镜头查看画面、提修改意见。</div>}
-        <section className="project-jobs"><div className="sidebar-title">后台任务 {activeJobs.length > 0 && <span>{activeJobs.length} 进行中</span>}</div>{jobs.slice(0, 5).map((job) => <article key={job.id} className={`job-${job.status}`}><strong>{jobKindLabel(job)} · {jobLabel[job.status] ?? job.status}</strong>{['running', 'queued'].includes(job.status) && <div className="job-progress"><i style={{ width: `${Math.round((job.progress ?? 0) * 100)}%` }} /></div>}<p>{job.detail}</p>{job.error && <pre>{job.error}</pre>}{job.kind !== 'analysis' && ['running', 'queued'].includes(job.status) && <button className="mini-button" onClick={() => void act(async () => { await projectApi(`/projects/${project!.id}/jobs/${job.id}/cancel`, {}); })}>取消任务</button>}
-          {cacheSummaryText(job) && <p className="job-cache">{cacheSummaryText(job)}</p>}
-          {job.result?.file && <a href={projectFile(project!.id, job.result.file)} target="_blank" rel="noreferrer">打开成片 · 工程 rev_{job.inputRevision}</a>}</article>)}
-          {!jobs.length && <p className="project-note">暂无任务。</p>}
-          {completedVideo && <p className="project-note">最新成片：{completedVideo.result?.frames} 帧 / {completedVideo.result?.seconds?.toFixed(2)}s。后续编辑不改变已经导出的版本。</p>}
-        </section>
+        <JobPanel projectId={project?.id ?? ''} jobs={jobs} onCancel={(id) => void act(async () => { if (project) await projectApi(`/projects/${project.id}/jobs/${id}/cancel`, {}); })} />
       </aside>
     </div>
     <footer className="statusbar"><span>本地工程 · SQLite + 引擎快照</span><span>{project ? `工程 rev_${project.revision} · ${project.song?.duration?.toFixed(2) ?? '歌曲分析中'}${project.song ? `s · ${project.output.fps}fps` : ''}` : `服务：${serviceUrl}`}</span><span>{activeJobs.length ? '后台任务运行中，页面可关闭' : '就绪'}</span></footer>
-    {source && <div className="modal-overlay" onKeyDown={(event) => { if (event.key === 'Escape') setSource(null); }}><div className="project-source-modal" role="dialog" aria-modal="true" aria-label={`${source.shotId} 源码`}><header><strong>{source.shotId} · 源码 / 输入 v{source.revision}</strong><button aria-label="关闭源码" onClick={() => setSource(null)}><X size={18} /></button></header>{error && <p className="shot-error" role="alert">{error}</p>}{source.feedback.length > 0 && <div className="project-source-feedback"><strong>这次改动明确响应了哪些意见？</strong>{source.feedback.map((note) => <label key={note.id}><input type="checkbox" checked={source.feedbackIds.includes(note.id)} onChange={(event) => setSource({ ...source, feedbackIds: event.target.checked ? [...source.feedbackIds, note.id] : source.feedbackIds.filter((id) => id !== note.id) })} />{note.text}</label>)}</div>}<textarea spellCheck={false} value={source.code} onChange={(event) => setSource({ ...source, code: event.target.value })} /><footer><span>保存为新版本，不覆盖原始文件。需要通过校验后才能作为有效产物。</span><button className="run-button" disabled={busy} onClick={() => void act(async () => {
+    {source && <ShotSourceDialog source={source} error={error} busy={busy} onChange={setSource} onClose={() => setSource(null)} onSave={() => void act(async () => {
       const next = await projectApi<VideoProject>(`/projects/${source.projectId}/shots/${source.shotId}/source`, { expectedInputRevision: source.revision, code: source.code, summary: '人工源码编辑', addressedFeedbackIds: source.feedbackIds, author: 'human' });
       setProject(next); setSource(null); if (selected) refreshForm(next, selected.id);
-    })}>保存新源码</button></footer></div></div>}
+    })} onSaveShared={()=>void act(async()=>{
+      if(!source.sharedModule) return;
+      const next=await projectApi<VideoProject>(`/projects/${source.projectId}/scene-modules/${source.sharedModule.id}`,{expectedProjectRevision:source.projectRevision,code:source.code,summary:'人工共享源码编辑',bindings:source.sharedModule.bindings.map(b=>({...b,addressedFeedbackIds:b.shotId===source.shotId?source.feedbackIds:[]}))});
+      setProject(next);setSource(null);if(selected)refreshForm(next,selected.id);
+    })} />}
     {compare && project && selected && <ReviewCompare key={`${project.id}:${selected.id}`} project={project} shot={selected} busy={busy} onClose={() => setCompare(false)} onProject={setProject} onAction={act} />}
   </div>;
 }

@@ -136,3 +136,18 @@ test('render：缺配置退出码 2；未知命令退出码 3', async () => {
   const unknown = await run(['nope']);
   assert.equal(unknown.code, 3);
 });
+
+test('extract-pitch/analyze-pitch persist measured reference and target reports; silence is input error', async () => {
+  const planPath=join(work,'reference-plan.json'),audio=join(work,'reference.wav'),tuned=join(work,'tuned.json'),reportPath=join(work,'measured.json');
+  writeFileSync(planPath,JSON.stringify({tempo:120,tracks:[{}],parts:[{notes:[{lyric:'a',tone:69,startBeats:0,durationBeats:2}]}]}));
+  writeWavMono16(audio,Float32Array.from({length:44100},(_,i)=>.3*Math.sin(2*Math.PI*440*2**(100/1200)*i/44100)));
+  const extracted=await run(['extract-pitch','--audio',audio,'--plan',planPath,'--out',tuned,'--json']);
+  assert.equal(extracted.code,0,extracted.stderr);assert.ok(existsSync(tuned+'.report.json'));
+  const curve=JSON.parse(readFileSync(tuned)).parts[0].pitchDeviation;
+  assert.ok(curve.some(p=>Math.abs(p.cents-100)<5));
+  const measured=await run(['analyze-pitch','--audio',audio,'--plan',tuned,'--out',reportPath,'--json']);
+  assert.equal(measured.code,0,measured.stderr);
+  const report=JSON.parse(readFileSync(reportPath));assert.equal(report.timingSource,'measured');assert.ok(report.summary.medianAbsTargetErrorCents<5);
+  writeWavMono16(audio,new Float32Array(44100));
+  assert.equal((await run(['extract-pitch','--audio',audio,'--plan',planPath,'--out',tuned,'--json'])).code,3);
+});

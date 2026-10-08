@@ -26,7 +26,7 @@ test('优先级：显式参数 > 环境变量 > 项目级配置文件 > 用户�
 
   const fromFile = resolveConfig({
     projectRoot: projectDir, homedirOverride: userHome, envOverride: NO_ENV,
-    // 项目级存在时用户级不应被读取（userHome 下文件此时不存在，读不到也无妨）
+    // 每个字段独立按项目配置优先、用户配置兜底。
   });
   assert.equal(fromFile.sources.openutauHome.value, 'FROM_PROJECT');
   assert.equal(fromFile.missing.length, 0);
@@ -120,4 +120,16 @@ test('configExample：示例里的路径是占位符而非真实路径', () => {
   const example = configExample();
   assert.ok(example.env[CONFIG_ENV_KEYS.resampler].endsWith('.exe'));
   assert.equal(JSON.stringify(example).includes('Martis'), false);
+});
+
+test('部分项目配置按字段继承用户配置；env argv JSON 可直接执行', () => {
+  const projectRoot = join(work, 'partial'), userHome = join(work, 'partial-home');
+  for (const dir of [projectRoot, userHome]) mkdirSync(join(dir, '.videograph'), { recursive: true });
+  writeFileSync(join(projectRoot, '.videograph/vocal.json'), JSON.stringify({ resamplerContract: 'openutau' }));
+  writeFileSync(join(userHome, '.videograph/vocal.json'), JSON.stringify({ resampler: 'user-tool', voicebankDir: 'user-bank', cacheDir: 'user-cache' }));
+  const config = resolveConfig({ projectRoot, homedirOverride: userHome, envOverride: { VIDEOGRAPH_OPENUTAU_RESAMPLER: '["node","wrapper.mjs"]' } });
+  assert.deepEqual(config.sources.resampler.value, ['node', 'wrapper.mjs']);
+  assert.equal(config.sources.voicebankDir.value, 'user-bank');
+  assert.equal(config.sources.resamplerContract.value, 'openutau');
+  assert.equal(config.sources.cacheDir.value, 'user-cache');
 });

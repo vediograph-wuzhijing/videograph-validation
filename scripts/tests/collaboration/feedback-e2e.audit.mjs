@@ -35,7 +35,7 @@ let service, vite, browser, client, projectId;
 const results = {};
 
 async function http(path, body, options = {}) {
-  const token = readFileSync(tokenFile, 'utf8');
+  const { token } = await (await fetch(serviceBase + '/session', { headers: { origin: studioBase } })).json();
   const response = await fetch(serviceBase + path, { method: body === undefined ? 'GET' : 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -50,7 +50,8 @@ async function invoke(name, args, expectError = false) {
   const text = response.content.filter((item) => item.type === 'text').map((item) => item.text).join('\n');
   if (expectError) { assert.equal(response.isError, true, `应为错误：${name}`); return text; }
   if (response.isError) throw new Error(`${name}: ${text}`);
-  return { value: JSON.parse(text), images: response.content.filter((item) => item.type === 'image') };
+  const structured = response.structuredContent ?? JSON.parse(response.content.find((item) => item.type === 'text').text);
+  return { value: structured, images: response.content.filter((item) => item.type === 'image') };
 }
 
 async function waitJob(forProject, jobId, { timeout = 600000, label = jobId } = {}) {
@@ -425,6 +426,19 @@ try {
   }
   await microPage.close();
   results.micro = { manifest: { revision: microManifest.revision, frames: microManifest.frames }, secondRunAllCached: true, lyricTiming: microComparisons };
+
+  log('微型工程：只改镜头 a → 导出验证只重渲一镜');
+  const latest = (await invoke('project_shot_source', { projectId: microId, shotId: 'a' })).value;
+  await invoke('project_shot_submit', { projectId: microId, shotId: 'a', expectedInputRevision: latest.shot.inputRevision,
+    code: latest.code.replace('const HUE = 205;', 'const HUE = 110;'), summary: 'incremental render cache regression' });
+  await waitJob(microId, (await invoke('project_validate', { projectId: microId, shotId: 'a' })).value.id, { label: 'micro incremental validate' });
+  const changed = await waitJob(microId, (await http(`/projects/${microId}/render`, {})).id, { label: 'micro export#3' });
+  assert.equal(changed.status, 'done', changed.error);
+  assert.equal(changed.result.cacheSummary.rendered, 1);
+  assert.equal(changed.result.cacheSummary.reused, 1);
+  const changedReport = changed.result.reports.find((entry) => !entry.cached);
+  assert.ok(changedReport.missReason.includes('code'), JSON.stringify(changedReport));
+  results.micro.incrementalCache = changed.result.cacheSummary;
 
   console.log(JSON.stringify({ ok: true, projectId, microId, servicePort, studioPort, ...results }, null, 2));
   console.log(`FB-04 端到端验收全绿，用时 ${((Date.now() - t0) / 60000).toFixed(1)} 分钟`);
